@@ -1,0 +1,13 @@
+{
+  "$comment": "SPDX-FileCopyrightText: 2026 maninblack; SPDX-License-Identifier: Apache-2.0",
+  "name": "@brake-health/dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@brake-health/contracts": "0.1.0",
+    "@brake-health/domain": "0.1.0",
+    "@brake-health/test-support": "0.1.0"
+  }
+}

@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: 2026 maninblack
+# SPDX-License-Identifier: Apache-2.0
+
+node_modules/
+out/
+coverage/
+.cache/
+*.db
+*.db-shm
+*.db-wal
+*.log
+.DS_Store
