@@ -31,6 +31,7 @@ CREATE TABLE messages (
   ),
   canonical_message TEXT NOT NULL,
   source_time TEXT NOT NULL,
+  source_time_normalized TEXT NOT NULL,
   local_time TEXT,
   backend_received_at TEXT NOT NULL,
   UNIQUE(unit_system_uid, message_type, message_identity)
@@ -53,6 +54,7 @@ CREATE TABLE window_chunks (
   phase_active_count INTEGER NOT NULL CHECK (phase_active_count BETWEEN 0 AND 10),
   phase_post_count INTEGER NOT NULL CHECK (phase_post_count BETWEEN 0 AND 10),
   first_sample_source_timestamp TEXT NOT NULL,
+  first_sample_source_timestamp_normalized TEXT NOT NULL,
   content_json TEXT NOT NULL,
   UNIQUE(unit_system_uid, event_id, chunk_index)
 ) STRICT;
@@ -68,6 +70,7 @@ CREATE TABLE window_completions (
   reason_code TEXT NOT NULL,
   trigger_timestamp TEXT NOT NULL,
   window_start_timestamp TEXT NOT NULL,
+  window_start_timestamp_normalized TEXT NOT NULL,
   window_end_timestamp TEXT NOT NULL,
   phase_pre_count INTEGER NOT NULL,
   phase_active_count INTEGER NOT NULL,
@@ -99,6 +102,7 @@ CREATE TABLE windows (
   phase_active_count INTEGER NOT NULL,
   phase_post_count INTEGER NOT NULL,
   window_start_timestamp TEXT NOT NULL,
+  window_start_timestamp_normalized TEXT NOT NULL,
   completion_content_sha256 TEXT,
   window_sha256 TEXT,
   last_backend_received_at TEXT NOT NULL,
@@ -111,6 +115,7 @@ CREATE TABLE assessments (
   assessment_id TEXT NOT NULL,
   source_event_id TEXT NOT NULL,
   assessed_at TEXT NOT NULL,
+  assessed_at_normalized TEXT NOT NULL,
   content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
   service_version TEXT NOT NULL,
   service_artifact_sha256 TEXT NOT NULL,
@@ -129,6 +134,7 @@ CREATE TABLE condition_events (
   assessment_id TEXT NOT NULL,
   source_event_id TEXT NOT NULL,
   effective_at TEXT NOT NULL,
+  effective_at_normalized TEXT NOT NULL,
   content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
   service_version TEXT NOT NULL,
   service_artifact_sha256 TEXT NOT NULL,
@@ -144,6 +150,7 @@ CREATE TABLE advisory_facts (
   request_id TEXT NOT NULL,
   gateway_state TEXT NOT NULL CHECK (gateway_state IN ('RECEIVED', 'APPLIED', 'CLEARED', 'REJECTED', 'EXPIRED', 'FAILED')),
   recorded_at TEXT NOT NULL,
+  recorded_at_normalized TEXT NOT NULL,
   content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
   UNIQUE(unit_system_uid, request_id, gateway_state)
 ) STRICT;
@@ -165,12 +172,12 @@ CREATE INDEX idx_messages_unit_received
 CREATE INDEX idx_window_chunks_unit_event
   ON window_chunks(unit_system_uid, event_id, chunk_index);
 CREATE INDEX idx_windows_unit_order
-  ON windows(unit_system_uid, window_start_timestamp DESC, event_id DESC);
+  ON windows(unit_system_uid, window_start_timestamp_normalized DESC, event_id DESC);
 CREATE INDEX idx_assessments_unit_order
-  ON assessments(unit_system_uid, assessed_at DESC, assessment_id DESC);
+  ON assessments(unit_system_uid, assessed_at_normalized DESC, assessment_id DESC);
 CREATE INDEX idx_events_unit_order
-  ON condition_events(unit_system_uid, effective_at DESC, event_id DESC);
+  ON condition_events(unit_system_uid, effective_at_normalized DESC, event_id DESC);
 CREATE INDEX idx_advisories_unit_order
-  ON advisory_facts(unit_system_uid, recorded_at DESC, request_id DESC, gateway_state DESC);
+  ON advisory_facts(unit_system_uid, recorded_at_normalized DESC, request_id DESC, gateway_state DESC);
 CREATE INDEX idx_quarantine_unit_key
   ON quarantine(unit_system_uid, message_key_sha256, quarantined_at DESC);

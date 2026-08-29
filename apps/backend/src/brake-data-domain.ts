@@ -3,7 +3,7 @@
 
 import { createHash } from "node:crypto";
 
-import type { JsonValue } from "./brake-data-contract.js";
+import { type JsonValue, normalizeRfc3339Instant } from "./brake-data-contract.js";
 
 export interface WindowChunkFact {
   readonly chunkIndex: number;
@@ -52,7 +52,8 @@ export function reconstructWindow(
     windowStartTimestamp: zeroStart ?? completionStart!,
     completionContentSha256: completion?.contentSha256 ?? null,
   };
-  if (zeroStart !== null && completionStart !== null && zeroStart !== completionStart) {
+  if (zeroStart !== null && completionStart !== null &&
+      normalizeRfc3339Instant(zeroStart) !== normalizeRfc3339Instant(completionStart)) {
     return quarantined(base, completion, "AUTHORITATIVE_START_MISMATCH");
   }
   if (completion === null) {
@@ -71,6 +72,16 @@ export function reconstructWindow(
   const expectedSamples = numberField(completion.content, "totalSamples");
   const expectedDigests = stringArray(completion.content, "chunkContentSha256");
   const expectedPhases = phaseCounts(completion.content.phaseSampleCounts);
+  const impossibleChunk = ordered.some(({ chunkIndex, content }) => {
+    const firstSampleIndex = numberField(content, "firstSampleIndex");
+    const samples = content.samples;
+    return chunkIndex < 0 || chunkIndex >= expected || firstSampleIndex < 0 ||
+      !Array.isArray(samples) || firstSampleIndex >= expectedSamples ||
+      firstSampleIndex + samples.length > expectedSamples;
+  });
+  if (impossibleChunk) {
+    return quarantined(base, completion, "COMBINED_WINDOW_INCONSISTENT");
+  }
   const completeIndexSet =
     ordered.length === expected &&
     ordered.every(({ chunkIndex }, index) => chunkIndex === index);

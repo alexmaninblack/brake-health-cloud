@@ -31,6 +31,7 @@ export interface ParsedBrakeMessage {
   readonly canonicalMessage: string;
   readonly canonicalMessageSha256: string;
   readonly sourceTime: string;
+  readonly sourceTimeNormalized: string;
   readonly changedResource: ChangedResource;
 }
 
@@ -119,6 +120,7 @@ export function parseBrakeMessage(raw: string): ParsedBrakeMessage {
     canonicalMessage,
     canonicalMessageSha256: sha256Hex(canonicalMessage),
     sourceTime: details.sourceTime,
+    sourceTimeNormalized: normalizeRfc3339Instant(details.sourceTime),
     changedResource: details.resource,
   };
 }
@@ -317,7 +319,7 @@ function validateAdvisory(
     "decisionId", "operation", "reasonCode", "issuedAt", "expiresAt", "gatewayReason",
     "gatewayObservedAt", "activeRecommendation", "activeReasonCode", "activeUntil",
   ]) {
-    if (!(required in content)) invalid(`advisory content is missing ${required}`);
+    if (!hasOwn(content, required)) invalid(`advisory content is missing ${required}`);
   }
   patterned(content.decisionId, BOUNDED_ID, "decisionId");
   const operation = enumValue(content.operation, ["SET", "CLEAR"] as const, "operation");
@@ -325,7 +327,7 @@ function validateAdvisory(
     exact(content.recommendation, "INSPECTION_RECOMMENDED", "recommendation");
     exact(content.reasonCode, "PREDICTED_BRAKE_DEGRADATION", "reasonCode");
   } else {
-    if ("recommendation" in content) invalid("CLEAR must not contain recommendation");
+    if (hasOwn(content, "recommendation")) invalid("CLEAR must not contain recommendation");
     exact(content.reasonCode, "CONDITION_CLEARED", "reasonCode");
   }
   dateTime(content.issuedAt, "issuedAt");
@@ -406,9 +408,7 @@ function band(value: JsonValue | undefined, label: string): string {
 }
 
 export function canonicalize(value: JsonValue): string {
-  if (typeof value === "string" && /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(value)) {
-    throw new ContractError("UNPROCESSABLE_MESSAGE", "RFC8785 strings must contain valid Unicode scalar values");
-  }
+  if (typeof value === "string") validateUnicodeScalarString(value);
   if (value === null || typeof value === "boolean" || typeof value === "string") {
     return JSON.stringify(value);
   }
@@ -421,8 +421,51 @@ export function canonicalize(value: JsonValue): string {
   }
   return `{${Object.keys(value)
     .sort()
-    .map((key) => `${JSON.stringify(key)}:${canonicalize(value[key]!)}`)
+    .map((key) => {
+      validateUnicodeScalarString(key);
+      return `${JSON.stringify(key)}:${canonicalize(value[key]!)}`;
+    })
     .join(",")}}`;
+}
+
+export function normalizeRfc3339Instant(value: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|([+-])(\d{2}):(\d{2}))$/.exec(value);
+  if (match === null) invalid("date-time is not RFC3339");
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const fraction = (match[7] ?? "").replace(/0+$/, "") || "0";
+  const offsetHour = Number(match[10] ?? 0);
+  const offsetMinute = Number(match[11] ?? 0);
+  if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 ||
+      second > 59 || offsetHour > 23 || offsetMinute > 59) {
+    invalid("date-time has an invalid calendar or offset field");
+  }
+  const local = new Date(0);
+  local.setUTCFullYear(year, month - 1, day);
+  local.setUTCHours(hour, minute, second, 0);
+  if (local.getUTCFullYear() !== year || local.getUTCMonth() !== month - 1 ||
+      local.getUTCDate() !== day || local.getUTCHours() !== hour ||
+      local.getUTCMinutes() !== minute || local.getUTCSeconds() !== second) {
+    invalid("date-time has an invalid calendar date");
+  }
+  const offsetDirection = match[9] === "-" ? -1 : 1;
+  const offsetMilliseconds = offsetDirection * (offsetHour * 60 + offsetMinute) * 60_000;
+  const utc = new Date(local.getTime() - offsetMilliseconds);
+  if (!Number.isFinite(utc.getTime())) invalid("date-time is outside the supported range");
+  const shiftedMilliseconds = BigInt(utc.getTime()) + 1_000_000_000_000_000n;
+  // The fixed-width shifted epoch sorts across UTC year boundaries. `!` sorts
+  // before decimal digits, so .1 also sorts before a later .1001 instant.
+  return `${shiftedMilliseconds.toString().padStart(16, "0")}.${fraction}!`;
+}
+
+function validateUnicodeScalarString(value: string): void {
+  if (/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(value)) {
+    throw new ContractError("UNPROCESSABLE_MESSAGE", "RFC8785 strings and property names must contain valid Unicode scalar values");
+  }
 }
 
 export function sha256Hex(value: string | Uint8Array): string {
@@ -458,7 +501,7 @@ class JsonReader {
 
   private object(): { [key: string]: JsonValue } {
     this.index++;
-    const result: { [key: string]: JsonValue } = {};
+    const result = Object.create(null) as { [key: string]: JsonValue };
     const keys = new Set<string>();
     this.space();
     if (this.source[this.index] === "}") { this.index++; return result; }
@@ -546,7 +589,7 @@ function closed(
 ): void {
   const actual = Object.keys(value);
   if (actual.some((key) => !allowed.includes(key))) invalid(`${label} contains an unexpected field`);
-  if (!optional && allowed.some((key) => !(key in value))) invalid(`${label} is missing a required field`);
+  if (!optional && allowed.some((key) => !hasOwn(value, key))) invalid(`${label} is missing a required field`);
 }
 
 function patterned(value: JsonValue | undefined, pattern: RegExp, label: string): string {
@@ -555,11 +598,12 @@ function patterned(value: JsonValue | undefined, pattern: RegExp, label: string)
 }
 
 function dateTime(value: JsonValue | undefined, label: string): string {
-  if (
-    typeof value !== "string" ||
-    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) ||
-    !Number.isFinite(Date.parse(value))
-  ) invalid(`${label} is not a date-time`);
+  if (typeof value !== "string") invalid(`${label} is not a date-time`);
+  try {
+    normalizeRfc3339Instant(value as string);
+  } catch {
+    invalid(`${label} is not a date-time`);
+  }
   return value as string;
 }
 
@@ -592,4 +636,8 @@ function exact(value: JsonValue | undefined | number, expected: JsonValue | numb
 
 function invalid(message: string): never {
   throw new ContractError("UNPROCESSABLE_MESSAGE", message);
+}
+
+function hasOwn(value: Readonly<Record<string, JsonValue>>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
 }

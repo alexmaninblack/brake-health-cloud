@@ -53,17 +53,26 @@ class HttpRequestError extends Error {
   }
 }
 
+class StorageError extends Error {
+  public constructor(options: ErrorOptions) {
+    super("Brake data storage is unavailable", options);
+    this.name = "StorageError";
+  }
+}
+
 export class BrakeDataHttp {
   private readonly currentUnits: ReadonlyMap<string, "VALIDATION" | "PRODUCTION"> | null;
   private readonly sortedSystemUids: readonly [string, string] | null;
   private readonly subscribers = new Set<Subscriber>();
   private eventId = 0n;
+  private storageAvailable = true;
 
   public constructor(
     private readonly store: BrakeDataStore,
     context: CurrentUnitContext | undefined,
     private readonly now: () => string = () => new Date().toISOString(),
     private readonly hmacKey: Uint8Array = randomBytes(32),
+    private readonly onStorageFailure: () => void = () => undefined,
   ) {
     const validated = validateContext(context);
     this.currentUnits = validated;
@@ -73,6 +82,10 @@ export class BrakeDataHttp {
   }
 
   public async handlePublic(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    if (!this.storageAvailable) {
+      sendError(response, 503, "TEMPORARILY_UNAVAILABLE", "data service is temporarily unavailable", true);
+      return;
+    }
     try {
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
       if (request.method === "POST" && url.pathname === "/api/v1/brake/messages") {
@@ -98,6 +111,10 @@ export class BrakeDataHttp {
   }
 
   public async handleAdmin(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    if (!this.storageAvailable) {
+      sendError(response, 503, "TEMPORARILY_UNAVAILABLE", "data service is temporarily unavailable", true);
+      return;
+    }
     try {
       if (request.method !== "POST") {
         sendError(response, 404, "NOT_FOUND", "admin route was not found", false);
@@ -131,7 +148,7 @@ export class BrakeDataHttp {
   private async ingest(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const raw = await readBody(request, PUBLIC_MAXIMUM, true);
     const message = parseBrakeMessage(raw);
-    const result = this.store.ingest(message, this.now());
+    const result = this.storage(() => this.store.ingest(message, this.now()));
     if (result.httpStatus === 409) {
       this.notify(message.unitSystemUid, result.changedResources);
       sendError(response, 409, result.errorCode, "message key already has different content", false);
@@ -145,7 +162,8 @@ export class BrakeDataHttp {
     const role = this.authorize(uid, response);
     if (role === null) return;
     const resource = resourceFor(plural);
-    if (url.searchParams.getAll("limit").length > 1 || url.searchParams.getAll("cursor").length > 1) {
+    if ([...url.searchParams.keys()].some((key) => key !== "limit" && key !== "cursor") ||
+        url.searchParams.getAll("limit").length > 1 || url.searchParams.getAll("cursor").length > 1) {
       sendError(response, 400, "INVALID_REQUEST", "query parameters must not be repeated", false);
       return;
     }
@@ -164,14 +182,15 @@ export class BrakeDataHttp {
         const expectedTieBreakers = resource === "ADVISORY" ? 2 : 1;
         if (!Array.isArray(cursor) || cursor.length !== 4 || cursor[0] !== uid || cursor[1] !== resource ||
             !Array.isArray(cursor[3]) || !cursor[3].every((item) => typeof item === "string") ||
-            cursor[3].length !== expectedTieBreakers || typeof cursor[2] !== "string") throw new Error("scope mismatch");
+            cursor[3].length !== expectedTieBreakers || typeof cursor[2] !== "string" ||
+            Buffer.from(canonicalize(cursor)).toString("base64url") !== cursorText) throw new Error("scope mismatch");
         after = [cursor[2], ...cursor[3] as string[]];
       } catch {
         sendError(response, 400, "INVALID_CURSOR", "cursor is invalid for this Unit and resource", false);
         return;
       }
     }
-    const page = this.store.query(resource, uid, limit, after);
+    const page = this.storage(() => this.store.query(resource, uid, limit, after));
     const nextCursor = page.nextKey === null ? null : Buffer.from(canonicalize([
       uid, resource, page.nextKey[0]!, page.nextKey.slice(1),
     ])).toString("base64url");
@@ -193,7 +212,8 @@ export class BrakeDataHttp {
       sendError(response, 503, "CURRENT_UNIT_CONTEXT_UNAVAILABLE", "current Unit context is unavailable", true);
       return;
     }
-    if (uid === null || url.searchParams.getAll("systemUid").length !== 1) {
+    if (uid === null || [...url.searchParams.keys()].some((key) => key !== "systemUid") ||
+        url.searchParams.getAll("systemUid").length !== 1) {
       sendError(response, 400, "INVALID_REQUEST", "stream requires exactly one systemUid", false);
       return;
     }
@@ -217,7 +237,7 @@ export class BrakeDataHttp {
       sendError(response, 503, "CURRENT_UNIT_CONTEXT_UNAVAILABLE", "current Unit context is unavailable", true);
       return;
     }
-    const summary = this.store.recordSet(systemUids);
+    const summary = this.storage(() => this.store.recordSet(systemUids));
     const expiresAt = new Date(Date.parse(this.now()) + 60_000).toISOString();
     const payload: JsonValue = [
       "brake-cleanup-preview-v1", [...systemUids], countsJson(summary.counts), summary.sha256, expiresAt,
@@ -251,12 +271,12 @@ export class BrakeDataHttp {
       this.tokenExpired(response);
       return;
     }
-    const current = this.store.recordSet(systemUids);
+    const current = this.storage(() => this.store.recordSet(systemUids));
     if (canonicalize(countsJson(current.counts)) !== canonicalize(countsJson(decoded.counts)) || current.sha256 !== decoded.digest) {
       sendError(response, 409, "PREVIEW_STALE", "current row set differs from the preview", false);
       return;
     }
-    const result = this.store.deleteMatching(systemUids, decoded.digest);
+    const result = this.storage(() => this.store.deleteMatching(systemUids, decoded.digest));
     if (result.stale) {
       sendError(response, 409, "PREVIEW_STALE", "current row set differs from the preview", false);
       return;
@@ -352,6 +372,16 @@ export class BrakeDataHttp {
     sendError(response, 409, "PREVIEW_TOKEN_EXPIRED", "preview token is invalid or expired", false);
   }
 
+  private storage<T>(operation: () => T): T {
+    try {
+      return operation();
+    } catch (cause) {
+      this.storageAvailable = false;
+      this.onStorageFailure();
+      throw new StorageError({ cause });
+    }
+  }
+
   private handleFailure(response: ServerResponse, error: unknown): void {
     if (error instanceof HttpRequestError) {
       sendError(response, 400, error.code, error.message, false);
@@ -360,6 +390,10 @@ export class BrakeDataHttp {
     if (error instanceof ContractError) {
       const status = error.code === "PAYLOAD_TOO_LARGE" ? 413 : 422;
       sendError(response, status, error.code, error.message, false);
+      return;
+    }
+    if (error instanceof StorageError) {
+      sendError(response, 503, "TEMPORARILY_UNAVAILABLE", "data service is temporarily unavailable", true);
       return;
     }
     if (error instanceof SyntaxError || error instanceof URIError) {

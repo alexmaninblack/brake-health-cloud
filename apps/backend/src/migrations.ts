@@ -16,6 +16,7 @@ export class MigrationError extends Error {
     public readonly code:
       | "INVALID_MIGRATION_SET"
       | "MIGRATION_FAILED"
+      | "SCHEMA_VALIDATION_FAILED"
       | "UNKNOWN_NEWER_SCHEMA",
     message: string,
     options?: ErrorOptions,
@@ -126,6 +127,74 @@ export function readSchemaVersion(database: DatabaseSync): number {
     );
   }
   return row.user_version;
+}
+
+export function validateSchemaV2(
+  database: DatabaseSync,
+  migrations: readonly Migration[],
+): void {
+  try {
+    if (migrations.length !== 2 || migrations[0]?.version !== 1 || migrations[0]?.name !== "initialize" ||
+        migrations[1]?.version !== 2 || migrations[1]?.name !== "brake_data" || readSchemaVersion(database) !== 2) {
+      throw new Error("application and database are not the exact v2 migration set");
+    }
+    const ledger = database
+      .prepare("SELECT version, name, applied_at FROM schema_version ORDER BY version")
+      .all() as Array<{ version: number; name: string; applied_at: string }>;
+    if (ledger.length !== 2 || ledger.some((row, index) =>
+      row.version !== migrations[index]!.version || row.name !== migrations[index]!.name ||
+      typeof row.applied_at !== "string" || row.applied_at.length === 0)) {
+      throw new Error("schema_version ledger does not exactly match v2");
+    }
+    if (database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'").get() !== undefined) {
+      throw new Error("legacy migration ledger remains after v2 transition");
+    }
+
+    const reference = new DatabaseSync(":memory:");
+    try {
+      applyMigrations(reference, migrations, "1970-01-01T00:00:00.000Z");
+      if (JSON.stringify(schemaManifest(database)) !== JSON.stringify(schemaManifest(reference))) {
+        throw new Error("database schema does not exactly match packaged v2");
+      }
+    } finally {
+      reference.close();
+    }
+
+    const integrity = database.prepare("PRAGMA integrity_check").all() as Array<{ integrity_check: string }>;
+    if (integrity.length !== 1 || integrity[0]?.integrity_check !== "ok") {
+      throw new Error("database integrity check failed");
+    }
+    probeReadWriteTransaction(database, ledger[1]!.applied_at);
+  } catch (error) {
+    if (error instanceof MigrationError && error.code === "SCHEMA_VALIDATION_FAILED") throw error;
+    throw new MigrationError("SCHEMA_VALIDATION_FAILED", "database failed exact v2 readiness validation", { cause: error });
+  }
+}
+
+function schemaManifest(database: DatabaseSync): readonly Record<string, unknown>[] {
+  return (database.prepare(
+    "SELECT type, name, tbl_name, sql FROM sqlite_master " +
+      "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+  ).all() as Array<Record<string, unknown>>).map((row) => ({ ...row }));
+}
+
+function probeReadWriteTransaction(database: DatabaseSync, originalAppliedAt: string): void {
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    database.prepare("UPDATE schema_version SET applied_at = ? WHERE version = 2").run("__readiness_probe__");
+    const probe = database.prepare("SELECT applied_at FROM schema_version WHERE version = 2").get() as
+      | { applied_at: string }
+      | undefined;
+    if (probe?.applied_at !== "__readiness_probe__") throw new Error("transactional write/read probe failed");
+    database.exec("ROLLBACK");
+  } catch (error) {
+    rollbackIfActive(database);
+    throw error;
+  }
+  const restored = database.prepare("SELECT applied_at FROM schema_version WHERE version = 2").get() as
+    | { applied_at: string }
+    | undefined;
+  if (restored?.applied_at !== originalAppliedAt) throw new Error("transactional probe rollback failed");
 }
 
 function validateMigrationSet(migrations: readonly Migration[]): void {

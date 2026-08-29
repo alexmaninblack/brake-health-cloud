@@ -15,6 +15,7 @@ import {
   loadMigrations,
   MigrationError,
   readSchemaVersion,
+  validateSchemaV2,
 } from "../../../out/backend/migrations.js";
 import {
   LOOPBACK_HOST,
@@ -48,9 +49,46 @@ test("fresh and repeat migration application is deterministic", () => {
       ],
     );
     assert.equal(reopened.prepare("SELECT name FROM sqlite_master WHERE name = 'schema_migrations'").get(), undefined);
+    validateSchemaV2(reopened, migrations);
     reopened.close();
   } finally {
     rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("exact v2 readiness rejects schema, ledger and transactional probe defects", async () => {
+  const migrations = loadMigrations(migrationsDirectory);
+  const queryOnly = new DatabaseSync(":memory:");
+  applyMigrations(queryOnly, migrations, deterministicNow());
+  queryOnly.exec("PRAGMA query_only = ON");
+  assert.throws(
+    () => validateSchemaV2(queryOnly, migrations),
+    (error) => error instanceof MigrationError && error.code === "SCHEMA_VALIDATION_FAILED",
+  );
+  queryOnly.close();
+
+  for (const corruption of [
+    "DROP INDEX idx_events_unit_order",
+    "UPDATE schema_version SET name = 'wrong' WHERE version = 2",
+  ]) {
+    const directory = mkdtempSync(join(tmpdir(), "brake-cloud-invalid-v2-"));
+    const databasePath = join(directory, "invalid.db");
+    const database = new DatabaseSync(databasePath);
+    applyMigrations(database, migrations, deterministicNow());
+    database.exec(corruption);
+    database.close();
+    const application = await startBackend({ databasePath, migrationsDirectory, now: deterministicNow });
+    try {
+      assert.deepEqual(application.readiness(), {
+        ready: false,
+        reason: "MIGRATION_FAILED",
+        schemaVersion: null,
+      });
+      assert.equal((await getJson(application.port, "/health/ready")).status, 503);
+    } finally {
+      await application.shutdown();
+      rmSync(directory, { force: true, recursive: true });
+    }
   }
 });
 
@@ -169,6 +207,46 @@ test("an unknown newer schema blocks readiness but not liveness", async (context
     contentType: "application/json; charset=utf-8",
     status: 503,
   });
+});
+
+test("an unrecoverable runtime storage error fails readiness and all later data access", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "brake-cloud-storage-loss-"));
+  const databasePath = join(directory, "storage.db");
+  const application = await startBackend({
+    databasePath,
+    migrationsDirectory,
+    now: deterministicNow,
+    currentUnitContext: {
+      schemaVersion: 1,
+      contractVersion: "1.0.0",
+      source: "CURRENT_RUN_PROVISIONING_JOURNAL",
+      testUnit: { systemUid: "test-system", unitRole: "VALIDATION", userFacingRole: "Test Vehicle" },
+      productionUnit: { systemUid: "production-system", unitRole: "PRODUCTION", userFacingRole: "Production Vehicle" },
+    },
+  });
+  try {
+    const corruptor = new DatabaseSync(databasePath);
+    corruptor.exec("DROP TABLE windows");
+    corruptor.close();
+
+    const failed = await getJson(application.port, "/api/v1/brake/units/test-system/windows");
+    assert.equal(failed.status, 503);
+    assert.equal(failed.body.errorCode, "TEMPORARILY_UNAVAILABLE");
+    assert.deepEqual(application.readiness(), {
+      ready: false,
+      reason: "DATABASE_UNAVAILABLE",
+      schemaVersion: 2,
+    });
+    assert.deepEqual((await getJson(application.port, "/health/ready")).body, {
+      ready: false,
+      reason: "DATABASE_UNAVAILABLE",
+      schemaVersion: 2,
+    });
+    assert.equal((await getJson(application.port, "/api/v1/brake/units/test-system/windows")).status, 503);
+  } finally {
+    await application.shutdown();
+    rmSync(directory, { force: true, recursive: true });
+  }
 });
 
 test("shutdown removes the owned temporary database directory", async () => {

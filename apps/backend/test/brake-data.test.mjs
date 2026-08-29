@@ -12,9 +12,10 @@ import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 
 import {
-  canonicalize, parseBrakeMessage, parseJsonRejectDuplicates, sha256Hex,
+  canonicalize, normalizeRfc3339Instant, parseBrakeMessage, parseJsonRejectDuplicates, sha256Hex,
 } from "../../../out/backend/brake-data-contract.js";
 import { BrakeDataStore } from "../../../out/backend/brake-data-store.js";
+import { BrakeDataHttp } from "../../../out/backend/brake-data-http.js";
 import { applyMigrations, loadMigrations } from "../../../out/backend/migrations.js";
 import { startBackend } from "../../../out/backend/server.js";
 
@@ -33,6 +34,29 @@ test("RFC8785 edge vectors and duplicate JSON keys are deterministic", () => {
   assert.throws(() => parseJsonRejectDuplicates('{"unitSystemUid":"one","unitSystemUid":"two"}'), /duplicate JSON key/);
   assert.throws(() => parseJsonRejectDuplicates("true\u00a0"), /suffix/);
   assert.throws(() => canonicalize("\ud800"), /valid Unicode/);
+  assert.throws(() => canonicalize({ ["\ud800"]: "invalid property name" }), /property names/);
+
+  const prototypeSensitive = parseJsonRejectDuplicates(
+    '{"__proto__":{"polluted":true},"constructor":"own","prototype":"own"}',
+  );
+  assert.equal(Object.getPrototypeOf(prototypeSensitive), null);
+  assert.equal(Object.hasOwn(prototypeSensitive, "__proto__"), true);
+  assert.equal(prototypeSensitive.__proto__.polluted, true);
+  assert.equal({}.polluted, undefined);
+  assert.equal(
+    canonicalize(prototypeSensitive),
+    '{"__proto__":{"polluted":true},"constructor":"own","prototype":"own"}',
+  );
+
+  assert.equal(
+    normalizeRfc3339Instant("2026-08-29T14:00:00.1000+02:00"),
+    normalizeRfc3339Instant("2026-08-29T12:00:00.1Z"),
+  );
+  assert.ok(
+    normalizeRfc3339Instant("2026-08-29T12:00:00Z") <
+      normalizeRfc3339Instant("2026-08-29T12:00:00.0001Z"),
+  );
+  assert.throws(() => normalizeRfc3339Instant("2026-02-29T12:00:00Z"), /calendar/);
 });
 
 test("conflicts quarantine without replacement and original receipt persists over restart", () => {
@@ -51,13 +75,20 @@ test("conflicts quarantine without replacement and original receipt persists ove
     const retry = store.ingest(parse(original), "2026-08-29T13:00:00.000Z");
     assert.equal(retry.httpStatus, 200);
     assert.equal(retry.acknowledgement.receiptId, accepted.acknowledgement.receiptId);
+    const changedMetadata = digest({ ...original, serviceArtifactSha256: "9".repeat(64) });
+    const metadataConflict = store.ingest(parse(changedMetadata), "2026-08-29T13:00:00.500Z");
+    assert.equal(metadataConflict.httpStatus, 409);
     const changedContent = structuredClone(original);
     changedContent.content.samples[0].brakePedalPercent = 61;
     const conflict = store.ingest(parse(digest(changedContent)), "2026-08-29T13:00:01.000Z");
     assert.equal(conflict.httpStatus, 409);
     const summary = store.recordSet([PRODUCTION_UID, TEST_UID].sort());
     assert.equal(summary.counts.messages, 1);
-    assert.equal(summary.counts.quarantine, 1);
+    assert.equal(summary.counts.quarantine, 2);
+    assert.equal(
+      database.prepare("SELECT canonical_message_sha256 FROM messages").get().canonical_message_sha256,
+      parse(original).canonicalMessageSha256,
+    );
     database.close();
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -107,6 +138,91 @@ test("exact Unit identity isolates equal event IDs and start mismatch stays non-
   const projection = store.query("WINDOW", TEST_UID, 50, null).items[0];
   assert.equal(projection.projectionState, "QUARANTINED");
   assert.equal(projection.terminalState, null);
+  database.close();
+});
+
+test("equivalent RFC3339 spellings match while impossible completion-relative chunks quarantine immediately", () => {
+  const database = new DatabaseSync(":memory:");
+  applyMigrations(database, loadMigrations(migrationsDirectory), NOW);
+  const store = new BrakeDataStore(database);
+
+  const zero = chunk(0);
+  zero.content.samples[0].sourceTimestamp = "2026-08-29T14:00:00.000+02:00";
+  const normalizedZero = digest(zero);
+  const one = chunk(1);
+  const equivalentCompletion = completion(normalizedZero, one);
+  store.ingest(parse(equivalentCompletion), NOW);
+  store.ingest(parse(normalizedZero), "2026-08-29T12:00:02.000Z");
+  store.ingest(parse(one), "2026-08-29T12:00:03.000Z");
+  const terminal = store.query("WINDOW", TEST_UID, 50, null).items[0];
+  assert.equal(terminal.projectionState, "TERMINAL");
+  assert.equal(terminal.windowStartTimestamp, "2026-08-29T14:00:00.000+02:00");
+
+  const otherEvent = "5cba2d80-c04a-4d24-9f03-f4a85d56da14";
+  const otherZero = digest({ ...chunk(0), eventId: otherEvent });
+  const otherOne = digest({ ...chunk(1), eventId: otherEvent });
+  const otherCompletion = { ...completion(otherZero, otherOne), eventId: otherEvent };
+  store.ingest(parse(otherCompletion), "2026-08-29T12:00:04.000Z");
+  const outOfRange = chunk(2);
+  outOfRange.eventId = otherEvent;
+  outOfRange.content.firstSampleIndex = 2;
+  outOfRange.content.samples[0].sampleIndex = 2;
+  store.ingest(parse(digest(outOfRange)), "2026-08-29T12:00:05.000Z");
+  const quarantined = store.query("WINDOW", TEST_UID, 50, null).items
+    .find((item) => item.eventId === otherEvent);
+  assert.equal(quarantined.projectionState, "QUARANTINED");
+  assert.equal(quarantined.terminalState, null);
+  assert.equal(store.recordSet([PRODUCTION_UID, TEST_UID].sort()).counts.quarantine, 1);
+  database.close();
+});
+
+test("resource ordering uses normalized instants and preserves source spelling", () => {
+  const database = new DatabaseSync(":memory:");
+  applyMigrations(database, loadMigrations(migrationsDirectory), NOW);
+  const store = new BrakeDataStore(database);
+  const earlier = advisory();
+  earlier.recordedAt = "2026-08-29T13:00:00+01:00";
+  const later = advisory();
+  later.requestId = "26223957-cdc3-57d4-af7d-74f78016ca0e";
+  later.recordedAt = "2026-08-29T12:30:00Z";
+  store.ingest(parse(digest(earlier)), NOW);
+  store.ingest(parse(digest(later)), "2026-08-29T12:31:00Z");
+  const page = store.query("ADVISORY", TEST_UID, 50, null);
+  assert.equal(page.items[0].message.requestId, later.requestId);
+  assert.equal(page.items[1].sourceEventTime, "2026-08-29T13:00:00+01:00");
+
+  const earlierAssessment = assessment();
+  earlierAssessment.assessedAt = "2026-08-29T13:00:00+01:00";
+  const laterAssessment = assessment();
+  laterAssessment.assessmentId = "69e854e8-596b-568b-8a18-12c44fb3a88c";
+  laterAssessment.assessedAt = "2026-08-29T12:30:00Z";
+  store.ingest(parse(digest(earlierAssessment)), "2026-08-29T12:32:00Z");
+  store.ingest(parse(digest(laterAssessment)), "2026-08-29T12:33:00Z");
+  const assessments = store.query("ASSESSMENT", TEST_UID, 50, null).items;
+  assert.equal(assessments[0].message.assessmentId, laterAssessment.assessmentId);
+  assert.equal(assessments[1].sourceEventTime, "2026-08-29T13:00:00+01:00");
+
+  const earlierEvent = event();
+  earlierEvent.content.effectiveAt = "2026-08-29T13:00:00+01:00";
+  const laterEvent = event();
+  laterEvent.eventId = "7b471c10-7ad6-530b-b5f4-d4b9f9107a8b";
+  laterEvent.content.effectiveAt = "2026-08-29T12:30:00Z";
+  store.ingest(parse(digest(earlierEvent)), "2026-08-29T12:34:00Z");
+  store.ingest(parse(digest(laterEvent)), "2026-08-29T12:35:00Z");
+  const events = store.query("EVENT", TEST_UID, 50, null).items;
+  assert.equal(events[0].message.eventId, laterEvent.eventId);
+  assert.equal(events[1].sourceEventTime, "2026-08-29T13:00:00+01:00");
+
+  const earlierWindow = chunk(0);
+  earlierWindow.content.samples[0].sourceTimestamp = "2026-08-29T13:00:00+01:00";
+  const laterWindow = chunk(0);
+  laterWindow.eventId = "6cba2d80-c04a-4d24-9f03-f4a85d56da15";
+  laterWindow.content.samples[0].sourceTimestamp = "2026-08-29T12:30:00Z";
+  store.ingest(parse(digest(earlierWindow)), "2026-08-29T12:36:00Z");
+  store.ingest(parse(digest(laterWindow)), "2026-08-29T12:37:00Z");
+  const windows = store.query("WINDOW", TEST_UID, 50, null).items;
+  assert.equal(windows[0].eventId, laterWindow.eventId);
+  assert.equal(windows[1].windowStartTimestamp, "2026-08-29T13:00:00+01:00");
   database.close();
 });
 
@@ -191,6 +307,19 @@ test("HTTP queries enforce current Unit scope and admin token errors preserve ro
   assert.equal((await http(application.port, "GET", `/api/v1/brake/units/${TEST_UID}/windows?cursor=bad`)).status, 400);
   assert.equal((await http(application.port, "POST", "/api/v1/brake/messages", "{duplicate:")).body.errorCode, "UNPROCESSABLE_MESSAGE");
   assert.equal((await http(application.port, "POST", "/api/v1/brake/messages", " ".repeat(131_073))).body.errorCode, "PAYLOAD_TOO_LARGE");
+  const prototypeMessage = JSON.stringify(advisory()).replace("{", '{"__proto__":{"polluted":true},');
+  assert.equal(
+    (await http(application.port, "POST", "/api/v1/brake/messages", prototypeMessage)).body.errorCode,
+    "UNPROCESSABLE_MESSAGE",
+  );
+  assert.equal({}.polluted, undefined);
+  assert.equal((await http(application.port, "GET", `/api/v1/brake/stream`)).body.errorCode, "INVALID_REQUEST");
+  assert.equal((await http(application.port, "GET", `/api/v1/brake/stream?systemUid=${TEST_UID}&unknown=1`)).body.errorCode, "INVALID_REQUEST");
+  assert.equal((await http(application.port, "GET", `/api/v1/brake/stream?systemUid=not-current`)).body.errorCode, "UNIT_NOT_CURRENT");
+  assert.equal((await http(application.port, "GET", `/api/v1/brake/stream?systemUid=${TEST_UID}&systemUid=${TEST_UID}`)).body.errorCode, "INVALID_REQUEST");
+  for (const suffix of ["?limit=0", "?limit=101", "?limit=1.5", "?limit=1&limit=2", "?cursor=a&cursor=b", "?unknown=1"]) {
+    assert.equal((await http(application.port, "GET", `/api/v1/brake/units/${TEST_UID}/windows${suffix}`)).status, 400);
+  }
 
   const ingest = await http(application.port, "POST", "/api/v1/brake/messages", JSON.stringify(advisory()));
   assert.equal(ingest.status, 201);
@@ -208,6 +337,10 @@ test("HTTP queries enforce current Unit scope and admin token errors preserve ro
     (await http(application.port, "GET", `/api/v1/brake/units/${PRODUCTION_UID}/advisories?cursor=${firstPage.body.nextCursor}`)).body.errorCode,
     "INVALID_CURSOR",
   );
+  assert.equal(
+    (await http(application.port, "GET", `/api/v1/brake/units/${TEST_UID}/assessments?cursor=${firstPage.body.nextCursor}`)).body.errorCode,
+    "INVALID_CURSOR",
+  );
 
   const stream = openSse(application.port, TEST_UID);
   await stream.ready;
@@ -217,6 +350,22 @@ test("HTTP queries enforce current Unit scope and admin token errors preserve ro
   const sseData = JSON.parse(wireEvent.match(/data: (.+)\n/)[1]);
   assert.deepEqual(sseData.changedResources, ["EVENT"]);
   assert.equal("items" in sseData, false);
+  const reconnect = openSse(application.port, TEST_UID);
+  await reconnect.ready;
+  assert.equal((await http(application.port, "POST", "/api/v1/brake/messages", JSON.stringify(assessment()))).status, 201);
+  const reconnectEvent = await reconnect.event;
+  assert.match(reconnectEvent, /^id: 2\nevent: brake-data-changed\ndata: /m);
+  const reconnectData = JSON.parse(reconnectEvent.match(/data: (.+)\n/)[1]);
+  assert.deepEqual(reconnectData.changedResources, ["ASSESSMENT", "EVENT"]);
+  assert.equal("items" in reconnectData, false);
+
+  assert.equal((await http(application.port, "POST", "/api/v1/brake/messages", JSON.stringify(chunk(0)))).status, 201);
+  for (const resource of ["windows", "assessments", "events", "advisories"]) {
+    const page = await http(application.port, "GET", `/api/v1/brake/units/${TEST_UID}/${resource}`);
+    assert.equal(page.status, 200);
+    assert.ok(page.body.items.length >= 1);
+    assert.equal(page.body.unitRole, "VALIDATION");
+  }
   const selector = [PRODUCTION_UID, TEST_UID].sort();
   const preview = await unix(socketPath, "/api/v1/brake/admin/current-run/cleanup-preview", {
     schemaVersion: 1, contractVersion: "1.0.0", systemUids: selector,
@@ -252,6 +401,11 @@ test("HTTP queries enforce current Unit scope and admin token errors preserve ro
     `{"schemaVersion":1,"schemaVersion":1,"contractVersion":"1.0.0","systemUids":${JSON.stringify(selector)}}`,
   );
   assert.equal(duplicateKeyAdmin.body.errorCode, "INVALID_REQUEST");
+  const prototypeAdmin = await requestJson(
+    { socketPath, method: "POST", path: "/api/v1/brake/admin/current-run/cleanup-preview" },
+    `{"schemaVersion":1,"contractVersion":"1.0.0","systemUids":${JSON.stringify(selector)},"__proto__":{"polluted":true}}`,
+  );
+  assert.equal(prototypeAdmin.body.errorCode, "INVALID_REQUEST");
   const bad = await unix(socketPath, "/api/v1/brake/admin/current-run/cleanup", {
     schemaVersion: 1, contractVersion: "1.0.0", systemUids: selector,
     confirmationToken: corruptToken(preview.body.confirmationToken),
@@ -268,7 +422,7 @@ test("HTTP queries enforce current Unit scope and admin token errors preserve ro
   const stalePreview = await unix(socketPath, "/api/v1/brake/admin/current-run/cleanup-preview", {
     schemaVersion: 1, contractVersion: "1.0.0", systemUids: selector,
   });
-  assert.equal((await http(application.port, "POST", "/api/v1/brake/messages", JSON.stringify(assessment()))).status, 201);
+  assert.equal((await http(application.port, "POST", "/api/v1/brake/messages", JSON.stringify(chunk(1)))).status, 201);
   const stale = await unix(socketPath, "/api/v1/brake/admin/current-run/cleanup", {
     schemaVersion: 1, contractVersion: "1.0.0", systemUids: selector,
     confirmationToken: stalePreview.body.confirmationToken,
@@ -314,6 +468,24 @@ test("a backend restart invalidates the process-local cleanup preview token", as
     await application?.shutdown();
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("SSE backpressure closes and removes the slow subscriber deterministically", () => {
+  const database = new DatabaseSync(":memory:");
+  applyMigrations(database, loadMigrations(migrationsDirectory), NOW);
+  const dataHttp = new BrakeDataHttp(
+    new BrakeDataStore(database), currentContext(), () => NOW, Buffer.alloc(32, 4),
+  );
+  let destroyed = false;
+  const response = {
+    write: () => false,
+    destroy: () => { destroyed = true; },
+  };
+  dataHttp.subscribers.add({ response, systemUid: TEST_UID });
+  dataHttp.notify(TEST_UID, ["EVENT"]);
+  assert.equal(destroyed, true);
+  assert.equal(dataHttp.subscribers.size, 0);
+  database.close();
 });
 
 function base(messageType, serviceVersion = "1.0.0") {

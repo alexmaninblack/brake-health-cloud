@@ -9,7 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import { BrakeDataHttp, type CurrentUnitContext } from "./brake-data-http.js";
 import { BrakeDataStore } from "./brake-data-store.js";
-import { applyMigrations, loadMigrations, MigrationError } from "./migrations.js";
+import { applyMigrations, loadMigrations, MigrationError, validateSchemaV2 } from "./migrations.js";
 
 export const LOOPBACK_HOST = "127.0.0.1";
 export const ADMIN_SOCKET_PATH = "/run/brake-health-cloud/admin.sock";
@@ -67,9 +67,17 @@ export async function startBackend(options: BackendOptions = {}): Promise<Backen
   try {
     database = new DatabaseSync(databasePath);
     database.exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA busy_timeout = 5000;");
-    const schemaVersion = applyMigrations(database, loadMigrations(migrationsDirectory), now());
+    const migrations = loadMigrations(migrationsDirectory);
+    const schemaVersion = applyMigrations(database, migrations, now());
+    validateSchemaV2(database, migrations);
     dataHttp = new BrakeDataHttp(
       new BrakeDataStore(database), options.currentUnitContext, now, options.cleanupHmacKey,
+      () => {
+        readiness.ready = false;
+        readiness.reason = "DATABASE_UNAVAILABLE";
+        readiness.schemaVersion = schemaVersion;
+        dataHttp?.closeStreams();
+      },
     );
     readiness.ready = true;
     readiness.reason = "READY";
@@ -90,7 +98,7 @@ export async function startBackend(options: BackendOptions = {}): Promise<Backen
       json(response, readiness.ready ? 200 : 503, {
         ready: readiness.ready, reason: readiness.reason, schemaVersion: readiness.schemaVersion,
       });
-    } else if (dataHttp !== undefined) {
+    } else if (dataHttp !== undefined && readiness.ready) {
       void dataHttp.handlePublic(request, response);
     } else {
       json(response, 503, {

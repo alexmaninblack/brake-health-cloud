@@ -8,6 +8,7 @@ import {
   canonicalize,
   type ChangedResource,
   type JsonValue,
+  normalizeRfc3339Instant,
   parseJsonRejectDuplicates,
   type ParsedBrakeMessage,
   sha256Hex,
@@ -83,13 +84,13 @@ export class BrakeDataStore {
     try {
       const existing = this.database
         .prepare(
-          "SELECT m.id, m.content_sha256, r.receipt_id, r.received_at " +
+          "SELECT m.id, m.canonical_message_sha256, r.receipt_id, r.received_at " +
             "FROM messages m JOIN receipts r ON r.message_id = m.id " +
             "WHERE m.unit_system_uid = ? AND m.message_type = ? AND m.message_identity = ?",
         )
         .get(message.unitSystemUid, message.messageType, message.messageIdentity) as SqlRow | undefined;
       if (existing !== undefined) {
-        if (existing.content_sha256 === message.contentSha256) {
+        if (existing.canonical_message_sha256 === message.canonicalMessageSha256) {
           this.database.exec("COMMIT");
           return {
             httpStatus: 200,
@@ -115,8 +116,8 @@ export class BrakeDataStore {
         .prepare(
           "INSERT INTO messages(" +
             "unit_system_uid, unit_role, message_type, message_identity, message_key_sha256, " +
-            "content_sha256, canonical_message_sha256, canonical_message, source_time, local_time, backend_received_at" +
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)",
+            "content_sha256, canonical_message_sha256, canonical_message, source_time, source_time_normalized, " +
+            "local_time, backend_received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)",
         )
         .run(
           message.unitSystemUid,
@@ -128,6 +129,7 @@ export class BrakeDataStore {
           message.canonicalMessageSha256,
           message.canonicalMessage,
           message.sourceTime,
+          message.sourceTimeNormalized,
           receivedAt,
         );
       const messageId = Number(inserted.lastInsertRowid);
@@ -163,7 +165,10 @@ export class BrakeDataStore {
       case "WINDOW":
         return this.queryWindows(unitSystemUid, limit, after);
       case "ASSESSMENT":
-        return this.queryMessages("assessments", "assessed_at", "assessment_id", resource, unitSystemUid, limit, after);
+        return this.queryMessages(
+          "assessments", "assessed_at", "assessed_at_normalized", "assessment_id",
+          resource, unitSystemUid, limit, after,
+        );
       case "EVENT":
         return this.queryEvents(unitSystemUid, limit, after);
       case "ADVISORY":
@@ -284,12 +289,13 @@ export class BrakeDataStore {
         }
         this.database.prepare(
           "INSERT INTO window_chunks(message_id, unit_system_uid, event_id, chunk_index, first_sample_index, " +
-            "sample_count, phase_pre_count, phase_active_count, phase_post_count, first_sample_source_timestamp, content_json) " +
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "sample_count, phase_pre_count, phase_active_count, phase_post_count, first_sample_source_timestamp, " +
+            "first_sample_source_timestamp_normalized, content_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         ).run(
           messageId, message.unitSystemUid, text(value.eventId), integer(content.chunkIndex),
           integer(content.firstSampleIndex), integer(content.sampleCount), phases.PRE, phases.ACTIVE, phases.POST,
-          text((samples[0] as Record<string, JsonValue>).sourceTimestamp), canonicalize(content),
+          text((samples[0] as Record<string, JsonValue>).sourceTimestamp),
+          normalizeRfc3339Instant(text((samples[0] as Record<string, JsonValue>).sourceTimestamp)), canonicalize(content),
         );
         return;
       }
@@ -297,12 +303,13 @@ export class BrakeDataStore {
         const phases = content.phaseSampleCounts as Record<string, JsonValue>;
         this.database.prepare(
           "INSERT INTO window_completions(message_id, unit_system_uid, event_id, terminal_state, reason_code, " +
-            "trigger_timestamp, window_start_timestamp, window_end_timestamp, phase_pre_count, phase_active_count, " +
+            "trigger_timestamp, window_start_timestamp, window_start_timestamp_normalized, window_end_timestamp, phase_pre_count, phase_active_count, " +
             "phase_post_count, total_samples, total_chunks, chunk_content_sha256_json, window_sha256, content_sha256) " +
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         ).run(
           messageId, message.unitSystemUid, text(value.eventId), text(content.terminalState), text(content.reasonCode),
-          text(content.triggerTimestamp), text(content.windowStartTimestamp), text(content.windowEndTimestamp),
+          text(content.triggerTimestamp), text(content.windowStartTimestamp), normalizeRfc3339Instant(text(content.windowStartTimestamp)),
+          text(content.windowEndTimestamp),
           integer(phases.PRE), integer(phases.ACTIVE), integer(phases.POST), integer(content.totalSamples),
           integer(content.totalChunks), canonicalize(content.chunkContentSha256!), text(content.windowSha256),
           message.contentSha256,
@@ -312,32 +319,34 @@ export class BrakeDataStore {
       case "BRAKE_HEALTH_ASSESSMENT":
         this.database.prepare(
           "INSERT INTO assessments(message_id, unit_system_uid, assessment_id, source_event_id, assessed_at, content_sha256, " +
-            "service_version, service_artifact_sha256, vdp_contract_version, vdp_contract_sha256, model_id, model_version, model_config_sha256) " +
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "assessed_at_normalized, service_version, service_artifact_sha256, vdp_contract_version, vdp_contract_sha256, " +
+            "model_id, model_version, model_config_sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         ).run(
           messageId, message.unitSystemUid, text(value.assessmentId), text(value.sourceEventId), text(value.assessedAt),
-          message.contentSha256, text(value.serviceVersion), text(value.serviceArtifactSha256), text(value.vdpContractVersion),
+          message.contentSha256, normalizeRfc3339Instant(text(value.assessedAt)), text(value.serviceVersion),
+          text(value.serviceArtifactSha256), text(value.vdpContractVersion),
           text(value.vdpContractSha256), text(value.modelId), text(value.modelVersion), text(value.modelConfigSha256),
         );
         return;
       case "BRAKE_HEALTH_EVENT":
         this.database.prepare(
           "INSERT INTO condition_events(message_id, unit_system_uid, event_id, assessment_id, source_event_id, effective_at, " +
-            "content_sha256, service_version, service_artifact_sha256, model_id, model_version, model_config_sha256) " +
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "effective_at_normalized, content_sha256, service_version, service_artifact_sha256, model_id, model_version, " +
+            "model_config_sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         ).run(
           messageId, message.unitSystemUid, text(value.eventId), text(value.assessmentId), text(value.sourceEventId),
-          text(content.effectiveAt), message.contentSha256, text(value.serviceVersion), text(value.serviceArtifactSha256),
+          text(content.effectiveAt), normalizeRfc3339Instant(text(content.effectiveAt)), message.contentSha256,
+          text(value.serviceVersion), text(value.serviceArtifactSha256),
           text(value.modelId), text(value.modelVersion), text(value.modelConfigSha256),
         );
         return;
       case "BRAKE_ADVISORY_FACT":
         this.database.prepare(
-          "INSERT INTO advisory_facts(message_id, unit_system_uid, request_id, gateway_state, recorded_at, content_sha256) " +
-            "VALUES (?, ?, ?, ?, ?, ?)",
+          "INSERT INTO advisory_facts(message_id, unit_system_uid, request_id, gateway_state, recorded_at, " +
+            "recorded_at_normalized, content_sha256) VALUES (?, ?, ?, ?, ?, ?, ?)",
         ).run(
           messageId, message.unitSystemUid, text(value.requestId), text(value.gatewayState), text(value.recordedAt),
-          message.contentSha256,
+          normalizeRfc3339Instant(text(value.recordedAt)), message.contentSha256,
         );
     }
   }
@@ -422,14 +431,16 @@ export class BrakeDataStore {
       "INSERT INTO windows(unit_system_uid, event_id, unit_role, service_version, service_artifact_sha256, " +
         "vdp_contract_version, vdp_contract_sha256, delivery_state, projection_state, terminal_state, " +
         "received_chunk_count, expected_chunk_count, received_sample_count, phase_pre_count, phase_active_count, " +
-        "phase_post_count, window_start_timestamp, completion_content_sha256, window_sha256, last_backend_received_at) " +
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+        "phase_post_count, window_start_timestamp, window_start_timestamp_normalized, completion_content_sha256, " +
+        "window_sha256, last_backend_received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
         "ON CONFLICT(unit_system_uid, event_id) DO UPDATE SET " +
         "delivery_state=excluded.delivery_state, projection_state=excluded.projection_state, terminal_state=excluded.terminal_state, " +
         "received_chunk_count=excluded.received_chunk_count, expected_chunk_count=excluded.expected_chunk_count, " +
         "received_sample_count=excluded.received_sample_count, phase_pre_count=excluded.phase_pre_count, " +
         "phase_active_count=excluded.phase_active_count, phase_post_count=excluded.phase_post_count, " +
-        "window_start_timestamp=excluded.window_start_timestamp, completion_content_sha256=excluded.completion_content_sha256, " +
+        "window_start_timestamp=excluded.window_start_timestamp, " +
+        "window_start_timestamp_normalized=excluded.window_start_timestamp_normalized, " +
+        "completion_content_sha256=excluded.completion_content_sha256, " +
         "window_sha256=excluded.window_sha256, last_backend_received_at=excluded.last_backend_received_at",
     ).run(
       message.unitSystemUid, eventId, message.unitRole, text(value.serviceVersion), text(value.serviceArtifactSha256),
@@ -437,7 +448,8 @@ export class BrakeDataStore {
       projection.projectionState, projection.terminalState, projection.receivedChunkCount,
       projection.expectedChunkCount, projection.receivedSampleCount, projection.phaseSampleCounts.PRE,
       projection.phaseSampleCounts.ACTIVE, projection.phaseSampleCounts.POST, projection.windowStartTimestamp,
-      projection.completionContentSha256, projection.windowSha256, receivedAt,
+      normalizeRfc3339Instant(projection.windowStartTimestamp), projection.completionContentSha256,
+      projection.windowSha256, receivedAt,
     );
   }
 
@@ -473,13 +485,14 @@ export class BrakeDataStore {
   ): QueryResult {
     const where = after === null
       ? "unit_system_uid = ?"
-      : "unit_system_uid = ? AND (window_start_timestamp < ? OR (window_start_timestamp = ? AND event_id < ?))";
+      : "unit_system_uid = ? AND (window_start_timestamp_normalized < ? OR " +
+        "(window_start_timestamp_normalized = ? AND event_id < ?))";
     const parameters = after === null
       ? [uid, limit + 1]
       : [uid, after[0], after[0], after[1], limit + 1];
     const rows = this.database.prepare(
       "SELECT * FROM windows WHERE " + where +
-        " ORDER BY window_start_timestamp DESC, event_id DESC LIMIT ?",
+        " ORDER BY window_start_timestamp_normalized DESC, event_id DESC LIMIT ?",
     ).all(...parameters) as SqlRow[];
     const page = rows.slice(0, limit);
     return {
@@ -508,7 +521,7 @@ export class BrakeDataStore {
         windowSha256: nullableString(row.window_sha256),
       })),
       nextKey: rows.length > limit && page.length > 0
-        ? [stringColumn(page.at(-1)!, "window_start_timestamp"), stringColumn(page.at(-1)!, "event_id")]
+        ? [stringColumn(page.at(-1)!, "window_start_timestamp_normalized"), stringColumn(page.at(-1)!, "event_id")]
         : null,
     };
   }
@@ -516,6 +529,7 @@ export class BrakeDataStore {
   private queryMessages(
     table: "assessments",
     timeColumn: "assessed_at",
+    normalizedTimeColumn: "assessed_at_normalized",
     identityColumn: "assessment_id",
     resource: "ASSESSMENT",
     uid: string,
@@ -524,12 +538,13 @@ export class BrakeDataStore {
   ): QueryResult {
     const where = after === null
       ? `a.unit_system_uid = ?`
-      : `a.unit_system_uid = ? AND (a.${timeColumn} < ? OR (a.${timeColumn} = ? AND a.${identityColumn} < ?))`;
+      : `a.unit_system_uid = ? AND (a.${normalizedTimeColumn} < ? OR ` +
+        `(a.${normalizedTimeColumn} = ? AND a.${identityColumn} < ?))`;
     const parameters = after === null ? [uid, limit + 1] : [uid, after[0], after[0], after[1], limit + 1];
     const rows = this.database.prepare(
-      `SELECT a.${timeColumn}, a.${identityColumn}, m.backend_received_at, m.canonical_message ` +
+      `SELECT a.${timeColumn}, a.${normalizedTimeColumn}, a.${identityColumn}, m.backend_received_at, m.canonical_message ` +
         `FROM ${table} a JOIN messages m ON m.id = a.message_id WHERE ${where} ` +
-        `ORDER BY a.${timeColumn} DESC, a.${identityColumn} DESC LIMIT ?`,
+        `ORDER BY a.${normalizedTimeColumn} DESC, a.${identityColumn} DESC LIMIT ?`,
     ).all(...parameters) as SqlRow[];
     const page = rows.slice(0, limit);
     return {
@@ -540,7 +555,7 @@ export class BrakeDataStore {
         message: objectJson(stringColumn(row, "canonical_message")),
       })),
       nextKey: rows.length > limit && page.length > 0
-        ? [stringColumn(page.at(-1)!, timeColumn), stringColumn(page.at(-1)!, identityColumn)]
+        ? [stringColumn(page.at(-1)!, normalizedTimeColumn), stringColumn(page.at(-1)!, identityColumn)]
         : null,
     };
   }
@@ -548,12 +563,13 @@ export class BrakeDataStore {
   private queryEvents(uid: string, limit: number, after: readonly string[] | null): QueryResult {
     const where = after === null
       ? "e.unit_system_uid = ?"
-      : "e.unit_system_uid = ? AND (e.effective_at < ? OR (e.effective_at = ? AND e.event_id < ?))";
+      : "e.unit_system_uid = ? AND (e.effective_at_normalized < ? OR " +
+        "(e.effective_at_normalized = ? AND e.event_id < ?))";
     const parameters = after === null ? [uid, limit + 1] : [uid, after[0], after[0], after[1], limit + 1];
     const rows = this.database.prepare(
       "SELECT e.*, m.backend_received_at, m.canonical_message FROM condition_events e " +
         "JOIN messages m ON m.id = e.message_id WHERE " + where +
-        " ORDER BY e.effective_at DESC, e.event_id DESC LIMIT ?",
+        " ORDER BY e.effective_at_normalized DESC, e.event_id DESC LIMIT ?",
     ).all(...parameters) as SqlRow[];
     const page = rows.slice(0, limit);
     return {
@@ -579,7 +595,7 @@ export class BrakeDataStore {
         } as JsonValue;
       }),
       nextKey: rows.length > limit && page.length > 0
-        ? [stringColumn(page.at(-1)!, "effective_at"), stringColumn(page.at(-1)!, "event_id")]
+        ? [stringColumn(page.at(-1)!, "effective_at_normalized"), stringColumn(page.at(-1)!, "event_id")]
         : null,
     };
   }
@@ -587,7 +603,7 @@ export class BrakeDataStore {
   private queryAdvisories(uid: string, limit: number, after: readonly string[] | null): QueryResult {
     const where = after === null
       ? "a.unit_system_uid = ?"
-      : "a.unit_system_uid = ? AND (a.recorded_at < ? OR (a.recorded_at = ? AND " +
+      : "a.unit_system_uid = ? AND (a.recorded_at_normalized < ? OR (a.recorded_at_normalized = ? AND " +
         "(a.request_id < ? OR (a.request_id = ? AND a.gateway_state < ?))))";
     const parameters = after === null
       ? [uid, limit + 1]
@@ -595,7 +611,7 @@ export class BrakeDataStore {
     const rows = this.database.prepare(
       "SELECT a.*, m.backend_received_at, m.canonical_message FROM advisory_facts a " +
         "JOIN messages m ON m.id = a.message_id WHERE " + where +
-        " ORDER BY a.recorded_at DESC, a.request_id DESC, a.gateway_state DESC LIMIT ?",
+        " ORDER BY a.recorded_at_normalized DESC, a.request_id DESC, a.gateway_state DESC LIMIT ?",
     ).all(...parameters) as SqlRow[];
     const page = rows.slice(0, limit);
     return {
@@ -609,7 +625,7 @@ export class BrakeDataStore {
         } as JsonValue;
       }),
       nextKey: rows.length > limit && page.length > 0
-        ? [stringColumn(page.at(-1)!, "recorded_at"), stringColumn(page.at(-1)!, "request_id"), stringColumn(page.at(-1)!, "gateway_state")]
+        ? [stringColumn(page.at(-1)!, "recorded_at_normalized"), stringColumn(page.at(-1)!, "request_id"), stringColumn(page.at(-1)!, "gateway_state")]
         : null,
     };
   }
