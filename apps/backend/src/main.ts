@@ -3,12 +3,16 @@
 
 import { pathToFileURL } from "node:url";
 
-import { LOOPBACK_HOST, startBackend } from "./server.js";
+import { ADMIN_SOCKET_PATH, LOOPBACK_HOST, startBackend } from "./server.js";
 
 export async function main(): Promise<void> {
-  const application = await startBackend({ host: LOOPBACK_HOST, port: 4300 });
+  const application = await startBackend({
+    adminSocketPath: ADMIN_SOCKET_PATH,
+    host: LOOPBACK_HOST,
+    port: 4300,
+  });
   process.stdout.write(
-    `Brake Cloud foundation listening on ${application.host}:${application.port}\n`,
+    `Brake Cloud data backend listening on ${application.host}:${application.port}\n`,
   );
   const stop = (): void => {
     void application.shutdown().then(() => process.exit(0));

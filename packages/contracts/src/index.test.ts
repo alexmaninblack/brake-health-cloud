@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   validateReleaseCandidate,
+  validateCurrentUnitContext,
   validateVehicleDataState,
 } from "./index";
 
@@ -45,5 +46,18 @@ describe("closed fixture contracts", () => {
         vdpVersion: "3.0.0",
       }),
     ).toHaveProperty("vdpVersion", "3.0.0");
+  });
+});
+
+describe("current Unit context", () => {
+  it("maps Test Vehicle to VALIDATION without accepting Cloud state", () => {
+    const context = {
+      schemaVersion: 1, contractVersion: "1.0.0", source: "CURRENT_RUN_PROVISIONING_JOURNAL",
+      testUnit: { systemUid: "test-1", unitRole: "VALIDATION", userFacingRole: "Test Vehicle" },
+      productionUnit: { systemUid: "production-1", unitRole: "PRODUCTION", userFacingRole: "Production Vehicle" },
+    };
+    expect(validateCurrentUnitContext(context)).toBe(context);
+    expect(() => validateCurrentUnitContext({ ...context, cloudReady: true })).toThrow(/unexpected field/);
+    expect(() => validateCurrentUnitContext({ ...context, productionUnit: context.testUnit })).toThrow(/invalid/);
   });
 });

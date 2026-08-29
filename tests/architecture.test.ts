@@ -24,6 +24,10 @@ describe("architecture boundaries", () => {
         const source = readFileSync(file, "utf8");
         for (const specifier of importSpecifiers(source)) {
           if (specifier.startsWith(".")) {
+            const target = resolve(file, "..", specifier);
+            if (!target.startsWith(join(root, sourceRoot))) {
+              violations.push(`${relative(root, file)} -> ${specifier}`);
+            }
             continue;
           }
           if (!allowedImport(sourceRoot, specifier)) {

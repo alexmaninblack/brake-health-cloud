@@ -37,3 +37,17 @@ export function viewLabel(view: DashboardView): string {
       return "Service Logs";
   }
 }
+
+export function compareDescendingKeyset(
+  left: readonly string[],
+  right: readonly string[],
+): number {
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index++) {
+    const leftValue = left[index] ?? "";
+    const rightValue = right[index] ?? "";
+    const compared = rightValue < leftValue ? -1 : rightValue > leftValue ? 1 : 0;
+    if (compared !== 0) return compared;
+  }
+  return 0;
+}

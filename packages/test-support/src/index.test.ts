@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   deterministicId,
+  CURRENT_UNIT_CONTEXT,
   RELEASE_CANDIDATES,
   SERVICE_LOG_FIXTURES,
   VEHICLE_DATA_FIXTURES,
@@ -29,5 +30,7 @@ describe("deterministic test support", () => {
       "UNAVAILABLE",
       "EMPTY",
     ]);
+    expect(CURRENT_UNIT_CONTEXT.testUnit.userFacingRole).toBe("Test Vehicle");
+    expect(CURRENT_UNIT_CONTEXT.testUnit.unitRole).toBe("VALIDATION");
   });
 });

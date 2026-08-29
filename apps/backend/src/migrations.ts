@@ -68,15 +68,16 @@ export function applyMigrations(
     database.exec("BEGIN IMMEDIATE");
     try {
       database.exec(migration.sql);
+      const ledger = migrationLedger(database);
       database
         .prepare(
-          "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
+          `INSERT INTO ${ledger}(version, name, applied_at) VALUES (?, ?, ?)`,
         )
         .run(migration.version, migration.name, appliedAt);
       database.exec(`PRAGMA user_version = ${migration.version}`);
       database.exec("COMMIT");
     } catch (error) {
-      database.exec("ROLLBACK");
+      rollbackIfActive(database);
       throw new MigrationError(
         "MIGRATION_FAILED",
         `migration ${migration.version.toString().padStart(3, "0")} failed`,
@@ -85,6 +86,33 @@ export function applyMigrations(
     }
   }
   return readSchemaVersion(database);
+}
+
+function rollbackIfActive(database: DatabaseSync): void {
+  try {
+    database.exec("ROLLBACK");
+  } catch {
+    // BEGIN itself may have failed because another serialized writer is active.
+  }
+}
+
+function migrationLedger(database: DatabaseSync): "schema_migrations" | "schema_version" {
+  const modern = database
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'")
+    .get();
+  if (modern !== undefined) {
+    return "schema_version";
+  }
+  const legacy = database
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'")
+    .get();
+  if (legacy !== undefined) {
+    return "schema_migrations";
+  }
+  throw new MigrationError(
+    "INVALID_MIGRATION_SET",
+    "migration did not provide a supported schema ledger",
+  );
 }
 
 export function readSchemaVersion(database: DatabaseSync): number {

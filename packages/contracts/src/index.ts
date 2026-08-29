@@ -3,6 +3,47 @@
 
 export type VdpVersion = "1.0.0" | "2.0.0" | "3.0.0";
 
+export type BrakeResourceType = "WINDOW" | "ASSESSMENT" | "EVENT" | "ADVISORY";
+
+export interface CurrentUnitContext {
+  readonly schemaVersion: 1;
+  readonly contractVersion: "1.0.0";
+  readonly source: "CURRENT_RUN_PROVISIONING_JOURNAL";
+  readonly testUnit: {
+    readonly systemUid: string;
+    readonly unitRole: "VALIDATION";
+    readonly userFacingRole: "Test Vehicle";
+  };
+  readonly productionUnit: {
+    readonly systemUid: string;
+    readonly unitRole: "PRODUCTION";
+    readonly userFacingRole: "Production Vehicle";
+  };
+}
+
+export function validateCurrentUnitContext(value: unknown): CurrentUnitContext {
+  const context = closedRecord(
+    value,
+    ["contractVersion", "productionUnit", "schemaVersion", "source", "testUnit"],
+    "current Unit context",
+  );
+  const testUnit = closedRecord(context.testUnit, ["systemUid", "unitRole", "userFacingRole"], "Test Vehicle");
+  const productionUnit = closedRecord(
+    context.productionUnit,
+    ["systemUid", "unitRole", "userFacingRole"],
+    "Production Vehicle",
+  );
+  if (
+    context.schemaVersion !== 1 || context.contractVersion !== "1.0.0" ||
+    context.source !== "CURRENT_RUN_PROVISIONING_JOURNAL" ||
+    testUnit.unitRole !== "VALIDATION" || testUnit.userFacingRole !== "Test Vehicle" ||
+    productionUnit.unitRole !== "PRODUCTION" || productionUnit.userFacingRole !== "Production Vehicle" ||
+    !systemUid(testUnit.systemUid) || !systemUid(productionUnit.systemUid) ||
+    testUnit.systemUid === productionUnit.systemUid
+  ) throw new TypeError("current Unit context has an invalid closed value");
+  return value as CurrentUnitContext;
+}
+
 export interface ReleaseCandidateFixture {
   readonly source: "FIXTURE_NON_LIVE";
   readonly candidateId: string;
@@ -156,4 +197,8 @@ function numberRecord(value: unknown): value is Record<string, number> {
       (item) => typeof item === "number" && Number.isFinite(item),
     )
   );
+}
+
+function systemUid(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(value);
 }

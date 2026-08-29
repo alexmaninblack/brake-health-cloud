@@ -2,10 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type {
+  CurrentUnitContext,
   ReleaseCandidateFixture,
   ServiceLogFixture,
   VehicleDataState,
 } from "@brake-health/contracts";
+
+export const CURRENT_UNIT_CONTEXT: CurrentUnitContext = {
+  schemaVersion: 1,
+  contractVersion: "1.0.0",
+  source: "CURRENT_RUN_PROVISIONING_JOURNAL",
+  testUnit: { systemUid: "test-system-fixture", unitRole: "VALIDATION", userFacingRole: "Test Vehicle" },
+  productionUnit: { systemUid: "production-system-fixture", unitRole: "PRODUCTION", userFacingRole: "Production Vehicle" },
+};
 
 export const FIXTURE_INSTANT = "2026-08-28T12:00:00.000Z";
 
