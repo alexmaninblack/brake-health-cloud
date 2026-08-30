@@ -376,8 +376,10 @@ export class BrakeDataHttp {
     try {
       return operation();
     } catch (cause) {
-      this.storageAvailable = false;
-      this.onStorageFailure();
+      if (!isRetryableSqliteContention(cause)) {
+        this.storageAvailable = false;
+        this.onStorageFailure();
+      }
       throw new StorageError({ cause });
     }
   }
@@ -490,4 +492,10 @@ function validCounts(value: JsonValue | undefined): value is RecordCounts & { [k
 
 function isJsonContentType(value: string | readonly string[] | undefined): boolean {
   return typeof value === "string" && value.split(";", 1)[0]!.trim().toLowerCase() === "application/json";
+}
+
+function isRetryableSqliteContention(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("errcode" in error)) return false;
+  const errcode = (error as { readonly errcode?: unknown }).errcode;
+  return errcode === 5 || errcode === 6;
 }

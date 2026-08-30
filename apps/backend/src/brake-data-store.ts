@@ -413,11 +413,22 @@ export class BrakeDataStore {
         inconsistencyReason: "WINDOW_IDENTITY_METADATA_MISMATCH",
       };
     }
+    if (this.hasWindowContentConflict(message.unitSystemUid, eventId)) {
+      projection = { ...projection, deliveryState: "CONFLICT" };
+    }
     if (projection.inconsistencyReason !== null) {
       this.insertQuarantine(message, projection.inconsistencyReason, receivedAt);
     }
     this.upsertWindow(message, eventId, projection, receivedAt);
     return ["WINDOW"];
+  }
+
+  private hasWindowContentConflict(unitSystemUid: string, eventId: string): boolean {
+    return this.database.prepare(
+      "SELECT 1 FROM quarantine WHERE unit_system_uid = ? AND reason_code = 'CONTENT_CONFLICT' " +
+        "AND ((message_type = 'WINDOW_COMPLETION' AND message_identity = ?) OR " +
+        "(message_type = 'WINDOW_CHUNK' AND message_identity LIKE ?)) LIMIT 1",
+    ).get(unitSystemUid, eventId, `${eventId}:%`) !== undefined;
   }
 
   private upsertWindow(

@@ -210,13 +210,23 @@ function validateCompletion(
     "windowEndTimestamp", "phaseSampleCounts", "totalSamples", "totalChunks",
     "chunkContentSha256", "windowSha256",
   ], "completion content");
-  enumValue(content.terminalState, [
+  const terminalState = enumValue(content.terminalState, [
     "COMPLETE", "TRUNCATED_MAX_DURATION", "INCOMPLETE_SOURCE_GAP",
     "ABORTED_SERVICE_STOP", "ABORTED_RESTART",
   ] as const, "terminalState");
-  enumValue(content.reasonCode, [
+  const reasonCode = enumValue(content.reasonCode, [
     "NORMAL_CLEAR", "MAX_ACTIVE_DURATION", "SOURCE_GAP", "SERVICE_STOP", "SERVICE_RESTART",
   ] as const, "reasonCode");
+  const expectedReason = {
+    COMPLETE: "NORMAL_CLEAR",
+    TRUNCATED_MAX_DURATION: "MAX_ACTIVE_DURATION",
+    INCOMPLETE_SOURCE_GAP: "SOURCE_GAP",
+    ABORTED_SERVICE_STOP: "SERVICE_STOP",
+    ABORTED_RESTART: "SERVICE_RESTART",
+  } as const;
+  if (reasonCode !== expectedReason[terminalState]) {
+    invalid("terminalState and reasonCode must be the accepted pair");
+  }
   dateTime(content.triggerTimestamp, "triggerTimestamp");
   const start = dateTime(content.windowStartTimestamp, "windowStartTimestamp");
   dateTime(content.windowEndTimestamp, "windowEndTimestamp");

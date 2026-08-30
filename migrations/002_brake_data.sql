@@ -22,12 +22,15 @@ CREATE TABLE messages (
   message_identity TEXT NOT NULL,
   message_key_sha256 TEXT NOT NULL CHECK (
     length(message_key_sha256) = 64 AND message_key_sha256 = lower(message_key_sha256)
+      AND message_key_sha256 NOT GLOB '*[^0-9a-f]*'
   ),
   content_sha256 TEXT NOT NULL CHECK (
     length(content_sha256) = 64 AND content_sha256 = lower(content_sha256)
+      AND content_sha256 NOT GLOB '*[^0-9a-f]*'
   ),
   canonical_message_sha256 TEXT NOT NULL CHECK (
     length(canonical_message_sha256) = 64 AND canonical_message_sha256 = lower(canonical_message_sha256)
+      AND canonical_message_sha256 NOT GLOB '*[^0-9a-f]*'
   ),
   canonical_message TEXT NOT NULL,
   source_time TEXT NOT NULL,
@@ -78,8 +81,14 @@ CREATE TABLE window_completions (
   total_samples INTEGER NOT NULL CHECK (total_samples BETWEEN 1 AND 150),
   total_chunks INTEGER NOT NULL CHECK (total_chunks BETWEEN 1 AND 15),
   chunk_content_sha256_json TEXT NOT NULL,
-  window_sha256 TEXT NOT NULL CHECK (length(window_sha256) = 64),
-  content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+  window_sha256 TEXT NOT NULL CHECK (
+    length(window_sha256) = 64 AND window_sha256 = lower(window_sha256)
+      AND window_sha256 NOT GLOB '*[^0-9a-f]*'
+  ),
+  content_sha256 TEXT NOT NULL CHECK (
+    length(content_sha256) = 64 AND content_sha256 = lower(content_sha256)
+      AND content_sha256 NOT GLOB '*[^0-9a-f]*'
+  ),
   UNIQUE(unit_system_uid, event_id)
 ) STRICT;
 
@@ -89,9 +98,15 @@ CREATE TABLE windows (
   event_id TEXT NOT NULL,
   unit_role TEXT NOT NULL CHECK (unit_role IN ('VALIDATION', 'PRODUCTION')),
   service_version TEXT NOT NULL,
-  service_artifact_sha256 TEXT NOT NULL CHECK (length(service_artifact_sha256) = 64),
+  service_artifact_sha256 TEXT NOT NULL CHECK (
+    length(service_artifact_sha256) = 64 AND service_artifact_sha256 = lower(service_artifact_sha256)
+      AND service_artifact_sha256 NOT GLOB '*[^0-9a-f]*'
+  ),
   vdp_contract_version TEXT NOT NULL,
-  vdp_contract_sha256 TEXT NOT NULL CHECK (length(vdp_contract_sha256) = 64),
+  vdp_contract_sha256 TEXT NOT NULL CHECK (
+    length(vdp_contract_sha256) = 64 AND vdp_contract_sha256 = lower(vdp_contract_sha256)
+      AND vdp_contract_sha256 NOT GLOB '*[^0-9a-f]*'
+  ),
   delivery_state TEXT NOT NULL CHECK (delivery_state IN ('RECEIVING', 'DELAYED', 'CONFLICT', 'DURABLY_RECEIVED')),
   projection_state TEXT NOT NULL CHECK (projection_state IN ('GROWING', 'PARTIAL', 'TERMINAL', 'QUARANTINED')),
   terminal_state TEXT,
@@ -103,8 +118,19 @@ CREATE TABLE windows (
   phase_post_count INTEGER NOT NULL,
   window_start_timestamp TEXT NOT NULL,
   window_start_timestamp_normalized TEXT NOT NULL,
-  completion_content_sha256 TEXT,
-  window_sha256 TEXT,
+  completion_content_sha256 TEXT CHECK (
+    completion_content_sha256 IS NULL OR (
+      length(completion_content_sha256) = 64
+        AND completion_content_sha256 = lower(completion_content_sha256)
+        AND completion_content_sha256 NOT GLOB '*[^0-9a-f]*'
+    )
+  ),
+  window_sha256 TEXT CHECK (
+    window_sha256 IS NULL OR (
+      length(window_sha256) = 64 AND window_sha256 = lower(window_sha256)
+        AND window_sha256 NOT GLOB '*[^0-9a-f]*'
+    )
+  ),
   last_backend_received_at TEXT NOT NULL,
   UNIQUE(unit_system_uid, event_id)
 ) STRICT;
@@ -116,14 +142,26 @@ CREATE TABLE assessments (
   source_event_id TEXT NOT NULL,
   assessed_at TEXT NOT NULL,
   assessed_at_normalized TEXT NOT NULL,
-  content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+  content_sha256 TEXT NOT NULL CHECK (
+    length(content_sha256) = 64 AND content_sha256 = lower(content_sha256)
+      AND content_sha256 NOT GLOB '*[^0-9a-f]*'
+  ),
   service_version TEXT NOT NULL,
-  service_artifact_sha256 TEXT NOT NULL,
+  service_artifact_sha256 TEXT NOT NULL CHECK (
+    length(service_artifact_sha256) = 64 AND service_artifact_sha256 = lower(service_artifact_sha256)
+      AND service_artifact_sha256 NOT GLOB '*[^0-9a-f]*'
+  ),
   vdp_contract_version TEXT NOT NULL,
-  vdp_contract_sha256 TEXT NOT NULL,
+  vdp_contract_sha256 TEXT NOT NULL CHECK (
+    length(vdp_contract_sha256) = 64 AND vdp_contract_sha256 = lower(vdp_contract_sha256)
+      AND vdp_contract_sha256 NOT GLOB '*[^0-9a-f]*'
+  ),
   model_id TEXT NOT NULL,
   model_version TEXT NOT NULL,
-  model_config_sha256 TEXT NOT NULL,
+  model_config_sha256 TEXT NOT NULL CHECK (
+    length(model_config_sha256) = 64 AND model_config_sha256 = lower(model_config_sha256)
+      AND model_config_sha256 NOT GLOB '*[^0-9a-f]*'
+  ),
   UNIQUE(unit_system_uid, assessment_id)
 ) STRICT;
 
@@ -135,12 +173,21 @@ CREATE TABLE condition_events (
   source_event_id TEXT NOT NULL,
   effective_at TEXT NOT NULL,
   effective_at_normalized TEXT NOT NULL,
-  content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+  content_sha256 TEXT NOT NULL CHECK (
+    length(content_sha256) = 64 AND content_sha256 = lower(content_sha256)
+      AND content_sha256 NOT GLOB '*[^0-9a-f]*'
+  ),
   service_version TEXT NOT NULL,
-  service_artifact_sha256 TEXT NOT NULL,
+  service_artifact_sha256 TEXT NOT NULL CHECK (
+    length(service_artifact_sha256) = 64 AND service_artifact_sha256 = lower(service_artifact_sha256)
+      AND service_artifact_sha256 NOT GLOB '*[^0-9a-f]*'
+  ),
   model_id TEXT NOT NULL,
   model_version TEXT NOT NULL,
-  model_config_sha256 TEXT NOT NULL,
+  model_config_sha256 TEXT NOT NULL CHECK (
+    length(model_config_sha256) = 64 AND model_config_sha256 = lower(model_config_sha256)
+      AND model_config_sha256 NOT GLOB '*[^0-9a-f]*'
+  ),
   UNIQUE(unit_system_uid, event_id)
 ) STRICT;
 
@@ -151,7 +198,10 @@ CREATE TABLE advisory_facts (
   gateway_state TEXT NOT NULL CHECK (gateway_state IN ('RECEIVED', 'APPLIED', 'CLEARED', 'REJECTED', 'EXPIRED', 'FAILED')),
   recorded_at TEXT NOT NULL,
   recorded_at_normalized TEXT NOT NULL,
-  content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+  content_sha256 TEXT NOT NULL CHECK (
+    length(content_sha256) = 64 AND content_sha256 = lower(content_sha256)
+      AND content_sha256 NOT GLOB '*[^0-9a-f]*'
+  ),
   UNIQUE(unit_system_uid, request_id, gateway_state)
 ) STRICT;
 
@@ -160,8 +210,14 @@ CREATE TABLE quarantine (
   unit_system_uid TEXT NOT NULL,
   message_type TEXT NOT NULL,
   message_identity TEXT NOT NULL,
-  message_key_sha256 TEXT NOT NULL CHECK (length(message_key_sha256) = 64),
-  attempted_content_sha256 TEXT NOT NULL CHECK (length(attempted_content_sha256) = 64),
+  message_key_sha256 TEXT NOT NULL CHECK (
+    length(message_key_sha256) = 64 AND message_key_sha256 = lower(message_key_sha256)
+      AND message_key_sha256 NOT GLOB '*[^0-9a-f]*'
+  ),
+  attempted_content_sha256 TEXT NOT NULL CHECK (
+    length(attempted_content_sha256) = 64 AND attempted_content_sha256 = lower(attempted_content_sha256)
+      AND attempted_content_sha256 NOT GLOB '*[^0-9a-f]*'
+  ),
   reason_code TEXT NOT NULL,
   quarantined_at TEXT NOT NULL,
   attempted_canonical_message TEXT NOT NULL

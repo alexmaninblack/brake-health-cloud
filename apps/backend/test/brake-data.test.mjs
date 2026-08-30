@@ -121,6 +121,59 @@ test("transaction, busy-writer and unavailable failures never leave partial data
   }
 });
 
+test("SQLITE_FULL rolls back the complete ingestion transaction", () => {
+  const directory = mkdtempSync(join(tmpdir(), "brake-data-full-"));
+  const path = join(directory, "full.db");
+  try {
+    const database = new DatabaseSync(path);
+    database.exec("PRAGMA page_size = 512");
+    applyMigrations(database, loadMigrations(migrationsDirectory), NOW);
+    const pageCount = database.prepare("PRAGMA page_count").get().page_count;
+    database.exec(`PRAGMA max_page_count = ${pageCount}`);
+    const store = new BrakeDataStore(database);
+    assert.throws(
+      () => store.ingest(parse(advisory()), NOW),
+      (error) => error?.errcode === 13 && error?.errstr === "database or disk is full",
+    );
+    assert.equal(database.prepare("SELECT COUNT(*) AS count FROM messages").get().count, 0);
+    assert.equal(database.prepare("SELECT COUNT(*) AS count FROM receipts").get().count, 0);
+    assert.equal(database.prepare("SELECT COUNT(*) AS count FROM advisory_facts").get().count, 0);
+    database.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("SQLITE_BUSY is retryable and does not permanently disable the data layer", () => {
+  const directory = mkdtempSync(join(tmpdir(), "brake-data-busy-retry-"));
+  const path = join(directory, "busy.db");
+  try {
+    const database = new DatabaseSync(path);
+    applyMigrations(database, loadMigrations(migrationsDirectory), NOW);
+    database.exec("PRAGMA busy_timeout = 0");
+    const store = new BrakeDataStore(database);
+    let fatalStorageFailures = 0;
+    const dataHttp = new BrakeDataHttp(
+      store, currentContext(), () => NOW, Buffer.alloc(32, 6),
+      () => { fatalStorageFailures++; },
+    );
+    const competitor = new DatabaseSync(path);
+    competitor.exec("PRAGMA busy_timeout = 0; BEGIN IMMEDIATE");
+    assert.throws(
+      () => dataHttp.storage(() => store.ingest(parse(advisory()), NOW)),
+      (error) => error?.cause?.errcode === 5,
+    );
+    assert.equal(dataHttp.storageAvailable, true);
+    assert.equal(fatalStorageFailures, 0);
+    competitor.exec("ROLLBACK");
+    competitor.close();
+    assert.equal(dataHttp.storage(() => store.ingest(parse(advisory()), NOW)).httpStatus, 201);
+    database.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("exact Unit identity isolates equal event IDs and start mismatch stays non-terminal", () => {
   const database = new DatabaseSync(":memory:");
   applyMigrations(database, loadMigrations(migrationsDirectory), NOW);
@@ -238,6 +291,115 @@ test("five frozen message families validate with exact content digests", () => {
     () => parseBrakeMessage(JSON.stringify({ ...advisory(), contentSha256: "0".repeat(64) })),
     /contentSha256/,
   );
+});
+
+test("all five message families enforce closed objects and the common bounded Unit identity", () => {
+  const first = chunk(0);
+  const messages = [first, completion(first, chunk(1)), assessment(), event(), advisory()];
+  for (const message of messages) {
+    const label = message.messageType;
+
+    const missing = structuredClone(message);
+    delete missing.contentSha256;
+    assert.throws(() => parse(missing), /missing/, `${label} missing required field`);
+
+    const extraTopLevel = { ...structuredClone(message), unexpected: true };
+    assert.throws(() => parse(extraTopLevel), /unexpected/, `${label} unexpected top-level field`);
+
+    const extraContent = structuredClone(message);
+    extraContent.content.unexpected = true;
+    assert.throws(() => parse(digest(extraContent)), /unexpected/, `${label} unexpected content field`);
+
+    const invalidUnit = { ...structuredClone(message), unitSystemUid: "unit with spaces" };
+    assert.throws(() => parse(invalidUnit), /unitSystemUid/, `${label} invalid Unit identity`);
+  }
+});
+
+test("all five invalid terminal-state and reason-code pairings are rejected before persistence", () => {
+  const zero = chunk(0);
+  const one = chunk(1);
+  const mismatches = [
+    ["COMPLETE", "SERVICE_STOP"],
+    ["TRUNCATED_MAX_DURATION", "NORMAL_CLEAR"],
+    ["INCOMPLETE_SOURCE_GAP", "SERVICE_RESTART"],
+    ["ABORTED_SERVICE_STOP", "SOURCE_GAP"],
+    ["ABORTED_RESTART", "MAX_ACTIVE_DURATION"],
+  ];
+  for (const [terminalState, reasonCode] of mismatches) {
+    const invalidCompletion = completion(zero, one);
+    invalidCompletion.content.terminalState = terminalState;
+    invalidCompletion.content.reasonCode = reasonCode;
+    assert.throws(
+      () => parse(digest(invalidCompletion)),
+      /terminalState and reasonCode must be the accepted pair/,
+    );
+  }
+});
+
+test("schema v2 rejects uppercase and non-hex values in every digest column", () => {
+  const database = new DatabaseSync(":memory:");
+  applyMigrations(database, loadMigrations(migrationsDirectory), NOW);
+  const store = new BrakeDataStore(database);
+  const zero = chunk(0);
+  const one = chunk(1);
+  store.ingest(parse(zero), NOW);
+  store.ingest(parse(one), "2026-08-29T12:00:02.000Z");
+  store.ingest(parse(completion(zero, one)), "2026-08-29T12:00:03.000Z");
+  store.ingest(parse(assessment()), "2026-08-29T12:00:04.000Z");
+  store.ingest(parse(event()), "2026-08-29T12:00:05.000Z");
+  store.ingest(parse(advisory()), "2026-08-29T12:00:06.000Z");
+  const conflict = structuredClone(zero);
+  conflict.content.samples[0].brakePedalPercent = 61;
+  assert.equal(store.ingest(parse(digest(conflict)), "2026-08-29T12:00:07.000Z").httpStatus, 409);
+
+  const valid = "0".repeat(64);
+  const insert = database.prepare(
+    "INSERT INTO messages(unit_system_uid, unit_role, message_type, message_identity, message_key_sha256, " +
+      "content_sha256, canonical_message_sha256, canonical_message, source_time, source_time_normalized, " +
+      "local_time, backend_received_at) VALUES (?, 'VALIDATION', 'BRAKE_HEALTH_EVENT', ?, ?, ?, ?, '{}', " +
+      "'2026-08-29T12:00:00Z', 'normalized', NULL, '2026-08-29T12:00:00Z')",
+  );
+  assert.throws(() => insert.run("direct-nonhex", "nonhex", "g".repeat(64), valid, valid), /constraint/i);
+  assert.throws(() => insert.run("direct-uppercase", "uppercase", valid, "A".repeat(64), valid), /constraint/i);
+
+  const digestColumns = {
+    messages: ["message_key_sha256", "content_sha256", "canonical_message_sha256"],
+    window_completions: ["window_sha256", "content_sha256"],
+    windows: ["service_artifact_sha256", "vdp_contract_sha256", "completion_content_sha256", "window_sha256"],
+    assessments: ["content_sha256", "service_artifact_sha256", "vdp_contract_sha256", "model_config_sha256"],
+    condition_events: ["content_sha256", "service_artifact_sha256", "model_config_sha256"],
+    advisory_facts: ["content_sha256"],
+    quarantine: ["message_key_sha256", "attempted_content_sha256"],
+  };
+  for (const [table, columns] of Object.entries(digestColumns)) {
+    for (const column of columns) {
+      const update = database.prepare(`UPDATE ${table} SET ${column} = ? WHERE rowid = (SELECT rowid FROM ${table} LIMIT 1)`);
+      assert.throws(() => update.run("g".repeat(64)), /constraint/i, `${table}.${column} non-hex`);
+      assert.throws(() => update.run("A".repeat(64)), /constraint/i, `${table}.${column} uppercase`);
+    }
+  }
+  database.close();
+});
+
+test("a durable window content conflict remains visible after later valid messages", () => {
+  const database = new DatabaseSync(":memory:");
+  applyMigrations(database, loadMigrations(migrationsDirectory), NOW);
+  const store = new BrakeDataStore(database);
+  const zero = chunk(0);
+  const one = chunk(1);
+  store.ingest(parse(zero), NOW);
+  const conflict = structuredClone(zero);
+  conflict.content.samples[0].speedKph = 41.5;
+  assert.equal(store.ingest(parse(digest(conflict)), "2026-08-29T12:00:01.000Z").httpStatus, 409);
+  assert.equal(store.query("WINDOW", TEST_UID, 50, null).items[0].deliveryState, "CONFLICT");
+
+  store.ingest(parse(one), "2026-08-29T12:00:02.000Z");
+  store.ingest(parse(completion(zero, one)), "2026-08-29T12:00:03.000Z");
+  const projection = store.query("WINDOW", TEST_UID, 50, null).items[0];
+  assert.equal(projection.projectionState, "TERMINAL");
+  assert.equal(projection.deliveryState, "CONFLICT");
+  assert.equal(store.recordSet([PRODUCTION_UID, TEST_UID].sort()).counts.quarantine, 1);
+  database.close();
 });
 
 test("durable store withholds pre-start chunks, reaches terminal, correlates provenance and cleans atomically", () => {
