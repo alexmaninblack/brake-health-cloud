@@ -9,6 +9,7 @@ import {
   type ChangedResource,
   type JsonValue,
   normalizeRfc3339Instant,
+  parseBrakeMessage,
   parseJsonRejectDuplicates,
   type ParsedBrakeMessage,
   sha256Hex,
@@ -47,6 +48,11 @@ export type QueryResource = "WINDOW" | "ASSESSMENT" | "EVENT" | "ADVISORY";
 export interface QueryResult {
   readonly items: readonly JsonValue[];
   readonly nextKey: readonly string[] | null;
+}
+
+export interface WindowDetailResult {
+  readonly window: JsonValue;
+  readonly samples: readonly JsonValue[];
 }
 
 export interface RecordCounts {
@@ -174,6 +180,49 @@ export class BrakeDataStore {
       case "ADVISORY":
         return this.queryAdvisories(unitSystemUid, limit, after);
     }
+  }
+
+  public queryWindowDetail(unitSystemUid: string, eventId: string): WindowDetailResult | null {
+    const windowRow = this.database.prepare(
+      "SELECT * FROM windows WHERE unit_system_uid = ? AND event_id = ?",
+    ).get(unitSystemUid, eventId) as SqlRow | undefined;
+    if (windowRow === undefined) return null;
+
+    const chunkRows = this.database.prepare(
+      "SELECT c.unit_system_uid, c.event_id, c.chunk_index, c.content_json, " +
+        "m.message_type, m.message_identity, m.content_sha256, m.canonical_message_sha256, m.canonical_message " +
+        "FROM window_chunks c JOIN messages m ON m.id = c.message_id " +
+        "WHERE c.unit_system_uid = ? AND c.event_id = ? ORDER BY c.chunk_index ASC",
+    ).all(unitSystemUid, eventId) as SqlRow[];
+    const samples: JsonValue[] = [];
+    for (const row of chunkRows) {
+      const canonicalMessage = stringColumn(row, "canonical_message");
+      const parsed = parseBrakeMessage(canonicalMessage);
+      const chunkIndex = numberColumn(row, "chunk_index");
+      const contentJson = stringColumn(row, "content_json");
+      const content = objectJson(contentJson);
+      if (parsed.canonicalMessage !== canonicalMessage ||
+          parsed.canonicalMessageSha256 !== stringColumn(row, "canonical_message_sha256") ||
+          parsed.messageType !== "WINDOW_CHUNK" ||
+          parsed.messageType !== stringColumn(row, "message_type") ||
+          parsed.unitSystemUid !== unitSystemUid ||
+          parsed.unitSystemUid !== stringColumn(row, "unit_system_uid") ||
+          text(parsed.value.eventId) !== eventId ||
+          eventId !== stringColumn(row, "event_id") ||
+          parsed.messageIdentity !== `${eventId}:${chunkIndex}` ||
+          parsed.messageIdentity !== stringColumn(row, "message_identity") ||
+          parsed.contentSha256 !== stringColumn(row, "content_sha256") ||
+          integer(parsed.content.chunkIndex) !== chunkIndex ||
+          contentJson !== canonicalize(content) ||
+          canonicalize(parsed.content) !== contentJson) {
+        throw new TypeError("stored window chunk identity or content is invalid");
+      }
+      const chunkSamples = parsed.content.samples;
+      if (!Array.isArray(chunkSamples)) throw new TypeError("stored window chunk samples are invalid");
+      samples.push(...chunkSamples);
+    }
+    if (samples.length > 150) throw new TypeError("stored window exceeds the sample bound");
+    return { window: windowItem(windowRow), samples };
   }
 
   public recordSet(systemUids: readonly [string, string], matching = true): RecordSetSummary {
@@ -507,30 +556,7 @@ export class BrakeDataStore {
     ).all(...parameters) as SqlRow[];
     const page = rows.slice(0, limit);
     return {
-      items: page.map((row) => ({
-        eventId: stringColumn(row, "event_id"),
-        unitSystemUid: stringColumn(row, "unit_system_uid"),
-        unitRole: stringColumn(row, "unit_role"),
-        serviceVersion: stringColumn(row, "service_version"),
-        serviceArtifactSha256: stringColumn(row, "service_artifact_sha256"),
-        vdpContractVersion: stringColumn(row, "vdp_contract_version"),
-        vdpContractSha256: stringColumn(row, "vdp_contract_sha256"),
-        windowStartTimestamp: stringColumn(row, "window_start_timestamp"),
-        backendReceivedAt: stringColumn(row, "last_backend_received_at"),
-        deliveryState: stringColumn(row, "delivery_state"),
-        projectionState: stringColumn(row, "projection_state"),
-        terminalState: nullableString(row.terminal_state),
-        receivedChunkCount: numberColumn(row, "received_chunk_count"),
-        expectedChunkCount: nullableNumber(row.expected_chunk_count),
-        receivedSampleCount: numberColumn(row, "received_sample_count"),
-        phaseSampleCounts: {
-          PRE: numberColumn(row, "phase_pre_count"),
-          ACTIVE: numberColumn(row, "phase_active_count"),
-          POST: numberColumn(row, "phase_post_count"),
-        },
-        completionContentSha256: nullableString(row.completion_content_sha256),
-        windowSha256: nullableString(row.window_sha256),
-      })),
+      items: page.map(windowItem),
       nextKey: rows.length > limit && page.length > 0
         ? [stringColumn(page.at(-1)!, "window_start_timestamp_normalized"), stringColumn(page.at(-1)!, "event_id")]
         : null,
@@ -657,6 +683,33 @@ export class BrakeDataStore {
     const values = rows.map((row) => fields.map((field) => sqlValue(row[field])) as JsonValue);
     return values.sort((left, right) => Buffer.compare(Buffer.from(canonicalize(left)), Buffer.from(canonicalize(right))));
   }
+}
+
+function windowItem(row: SqlRow): JsonValue {
+  return {
+    eventId: stringColumn(row, "event_id"),
+    unitSystemUid: stringColumn(row, "unit_system_uid"),
+    unitRole: stringColumn(row, "unit_role"),
+    serviceVersion: stringColumn(row, "service_version"),
+    serviceArtifactSha256: stringColumn(row, "service_artifact_sha256"),
+    vdpContractVersion: stringColumn(row, "vdp_contract_version"),
+    vdpContractSha256: stringColumn(row, "vdp_contract_sha256"),
+    windowStartTimestamp: stringColumn(row, "window_start_timestamp"),
+    backendReceivedAt: stringColumn(row, "last_backend_received_at"),
+    deliveryState: stringColumn(row, "delivery_state"),
+    projectionState: stringColumn(row, "projection_state"),
+    terminalState: nullableString(row.terminal_state),
+    receivedChunkCount: numberColumn(row, "received_chunk_count"),
+    expectedChunkCount: nullableNumber(row.expected_chunk_count),
+    receivedSampleCount: numberColumn(row, "received_sample_count"),
+    phaseSampleCounts: {
+      PRE: numberColumn(row, "phase_pre_count"),
+      ACTIVE: numberColumn(row, "phase_active_count"),
+      POST: numberColumn(row, "phase_post_count"),
+    },
+    completionContentSha256: nullableString(row.completion_content_sha256),
+    windowSha256: nullableString(row.window_sha256),
+  };
 }
 
 function acknowledgement(

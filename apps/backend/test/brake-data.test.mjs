@@ -398,7 +398,58 @@ test("a durable window content conflict remains visible after later valid messag
   const projection = store.query("WINDOW", TEST_UID, 50, null).items[0];
   assert.equal(projection.projectionState, "TERMINAL");
   assert.equal(projection.deliveryState, "CONFLICT");
+  assert.equal(store.queryWindowDetail(TEST_UID, SOURCE_EVENT).samples[0].speedKph, 42);
   assert.equal(store.recordSet([PRODUCTION_UID, TEST_UID].sort()).counts.quarantine, 1);
+  database.close();
+});
+
+test("window detail reconstructs exact accepted samples and fails closed on stored corruption", () => {
+  const database = new DatabaseSync(":memory:");
+  applyMigrations(database, loadMigrations(migrationsDirectory), NOW);
+  const store = new BrakeDataStore(database);
+  const completionOnlyEvent = "5cba2d80-c04a-4d24-9f03-f4a85d56da14";
+  const completionOnlyZero = digest({ ...chunk(0), eventId: completionOnlyEvent });
+  const completionOnlyOne = digest({ ...chunk(1), eventId: completionOnlyEvent });
+  store.ingest(
+    parse(digest({ ...completion(completionOnlyZero, completionOnlyOne), eventId: completionOnlyEvent })),
+    NOW,
+  );
+  const completionOnly = store.queryWindowDetail(TEST_UID, completionOnlyEvent);
+  assert.equal(completionOnly.window.projectionState, "PARTIAL");
+  assert.deepEqual(completionOnly.samples, []);
+
+  const acceptedChunks = Array.from({ length: 15 }, (_, index) => chunkWithSamples(index, 10));
+  for (const [index, value] of acceptedChunks.entries()) {
+    store.ingest(parse(value), `2026-08-29T12:01:${String(index).padStart(2, "0")}.000Z`);
+  }
+  const collectionWindow = store.query("WINDOW", TEST_UID, 50, null).items
+    .find(({ eventId }) => eventId === SOURCE_EVENT);
+  const detail = store.queryWindowDetail(TEST_UID, SOURCE_EVENT);
+  assert.deepEqual(detail.window, collectionWindow);
+  assert.equal(detail.samples.length, 150);
+  assert.deepEqual(detail.samples.map(({ sampleIndex }) => sampleIndex), Array.from({ length: 150 }, (_, index) => index));
+  assert.equal(store.queryWindowDetail(TEST_UID, "6cba2d80-c04a-4d24-9f03-f4a85d56da15"), null);
+
+  const original = database.prepare(
+    "SELECT c.content_json, m.content_sha256, m.canonical_message, m.canonical_message_sha256, m.message_identity " +
+      "FROM window_chunks c JOIN messages m ON m.id = c.message_id WHERE c.chunk_index = 0",
+  ).get();
+  database.prepare("UPDATE window_chunks SET content_json = ? WHERE chunk_index = 0")
+    .run(JSON.stringify(JSON.parse(original.content_json), null, 2));
+  assert.throws(() => store.queryWindowDetail(TEST_UID, SOURCE_EVENT), /stored window chunk/);
+  database.prepare("UPDATE window_chunks SET content_json = ? WHERE chunk_index = 0").run(original.content_json);
+
+  database.prepare("UPDATE messages SET content_sha256 = ? WHERE id = (SELECT message_id FROM window_chunks WHERE chunk_index = 0)")
+    .run("9".repeat(64));
+  assert.throws(() => store.queryWindowDetail(TEST_UID, SOURCE_EVENT), /stored window chunk/);
+  database.prepare("UPDATE messages SET content_sha256 = ? WHERE id = (SELECT message_id FROM window_chunks WHERE chunk_index = 0)")
+    .run(acceptedChunks[0].contentSha256);
+
+  database.prepare("UPDATE messages SET message_identity = ? WHERE id = (SELECT message_id FROM window_chunks WHERE chunk_index = 0)")
+    .run(`${SOURCE_EVENT}:99`);
+  assert.throws(() => store.queryWindowDetail(TEST_UID, SOURCE_EVENT), /stored window chunk/);
+  database.prepare("UPDATE messages SET message_identity = ? WHERE id = (SELECT message_id FROM window_chunks WHERE chunk_index = 0)")
+    .run(original.message_identity);
   database.close();
 });
 
@@ -522,6 +573,35 @@ test("HTTP queries enforce current Unit scope and admin token errors preserve ro
   assert.equal("items" in reconnectData, false);
 
   assert.equal((await http(application.port, "POST", "/api/v1/brake/messages", JSON.stringify(chunk(0)))).status, 201);
+  const detail = await http(application.port, "GET", `/api/v1/brake/units/${TEST_UID}/windows/${SOURCE_EVENT}`);
+  const collection = await http(application.port, "GET", `/api/v1/brake/units/${TEST_UID}/windows`);
+  assert.equal(detail.status, 200);
+  assert.deepEqual(Object.keys(detail.body).sort(), [
+    "contractVersion", "resourceType", "samples", "schemaVersion", "unitRole", "unitSystemUid", "window",
+  ]);
+  assert.equal(detail.body.resourceType, "WINDOW_DETAIL");
+  assert.equal(detail.body.unitRole, "VALIDATION");
+  assert.deepEqual(detail.body.window, collection.body.items[0]);
+  assert.deepEqual(detail.body.samples, chunk(0).content.samples);
+  for (const path of [
+    `/api/v1/brake/units/${TEST_UID}/windows/not-a-uuid`,
+    `/api/v1/brake/units/${TEST_UID}/windows/${SOURCE_EVENT.toUpperCase()}`,
+    `/api/v1/brake/units/${TEST_UID}/windows/${SOURCE_EVENT}?limit=1`,
+    `/api/v1/brake/units/${TEST_UID}/windows/${SOURCE_EVENT}?cursor=x`,
+    `/api/v1/brake/units/${TEST_UID}/windows/${SOURCE_EVENT}?unknown=1`,
+    `/api/v1/brake/units/${TEST_UID}/windows/${SOURCE_EVENT}/extra`,
+    `/api/v1/brake/units/${TEST_UID}/windows/`,
+  ]) {
+    assert.equal((await http(application.port, "GET", path)).body.errorCode, "INVALID_REQUEST");
+  }
+  assert.equal(
+    (await http(application.port, "GET", `/api/v1/brake/units/${TEST_UID}/windows/5cba2d80-c04a-4d24-9f03-f4a85d56da14`)).body.errorCode,
+    "NOT_FOUND",
+  );
+  assert.equal(
+    (await http(application.port, "GET", `/api/v1/brake/units/not-current/windows/not-a-uuid`)).body.errorCode,
+    "UNIT_NOT_CURRENT",
+  );
   for (const resource of ["windows", "assessments", "events", "advisories"]) {
     const page = await http(application.port, "GET", `/api/v1/brake/units/${TEST_UID}/${resource}`);
     assert.equal(page.status, 200);
@@ -672,6 +752,22 @@ function chunk(index) {
   return digest({
     ...base("WINDOW_CHUNK"), eventType: "HARD_BRAKING_EPISODE_V1", eventId: SOURCE_EVENT,
     vdpContractVersion: "1.0.0", vdpContractSha256: "2".repeat(64), content,
+  });
+}
+
+function chunkWithSamples(chunkIndex, sampleCount) {
+  const firstSampleIndex = chunkIndex * sampleCount;
+  const template = chunk(0).content.samples[0];
+  const samples = Array.from({ length: sampleCount }, (_, offset) => ({
+    ...template,
+    sampleIndex: firstSampleIndex + offset,
+    sourceTimestamp: `2026-08-29T12:00:00.${String(firstSampleIndex + offset).padStart(3, "0")}Z`,
+    phase: firstSampleIndex + offset === 0 ? "PRE" : "ACTIVE",
+  }));
+  return digest({
+    ...base("WINDOW_CHUNK"), eventType: "HARD_BRAKING_EPISODE_V1", eventId: SOURCE_EVENT,
+    vdpContractVersion: "1.0.0", vdpContractSha256: "2".repeat(64),
+    content: { chunkIndex, firstSampleIndex, sampleCount, samples },
   });
 }
 

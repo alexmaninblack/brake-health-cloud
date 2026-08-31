@@ -170,6 +170,10 @@ test("health endpoints are closed, ready and loopback-only", async (context) => 
     (await getJson(application.port, "/api/v1/brake/units/test-system/windows")).body.errorCode,
     "CURRENT_UNIT_CONTEXT_UNAVAILABLE",
   );
+  assert.equal(
+    (await getJson(application.port, "/api/v1/brake/units/test-system/windows/4cba2d80-c04a-4d24-9f03-f4a85d56da13")).body.errorCode,
+    "CURRENT_UNIT_CONTEXT_UNAVAILABLE",
+  );
   await assert.rejects(
     startBackend({ host: "0.0.0.0" }),
     /backend host must be 127\.0\.0\.1/,
@@ -229,7 +233,10 @@ test("an unrecoverable runtime storage error fails readiness and all later data 
     corruptor.exec("DROP TABLE windows");
     corruptor.close();
 
-    const failed = await getJson(application.port, "/api/v1/brake/units/test-system/windows");
+    const failed = await getJson(
+      application.port,
+      "/api/v1/brake/units/test-system/windows/4cba2d80-c04a-4d24-9f03-f4a85d56da13",
+    );
     assert.equal(failed.status, 503);
     assert.equal(failed.body.errorCode, "TEMPORARILY_UNAVAILABLE");
     assert.deepEqual(application.readiness(), {

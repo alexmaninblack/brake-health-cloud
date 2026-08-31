@@ -43,6 +43,7 @@ interface Subscriber {
 }
 
 const UID = /^[A-Za-z0-9._:-]{1,128}$/;
+const UUID4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const PUBLIC_MAXIMUM = 131_072;
 const ADMIN_MAXIMUM = 4_096;
 const TOKEN_MAXIMUM = 1_024;
@@ -99,9 +100,20 @@ export class BrakeDataHttp {
         this.stream(url, response);
         return;
       }
+      const detailMatch = /^\/api\/v1\/brake\/units\/([^/]+)\/windows\/([^/]+)$/.exec(url.pathname);
+      if (request.method === "GET" && detailMatch !== null) {
+        this.windowDetail(decodeURIComponent(detailMatch[1]!), detailMatch[2]!, url, response);
+        return;
+      }
       const match = /^\/api\/v1\/brake\/units\/([^/]+)\/(windows|assessments|events|advisories)$/.exec(url.pathname);
       if (request.method === "GET" && match !== null) {
         this.query(decodeURIComponent(match[1]!), match[2]!, url, response);
+        return;
+      }
+      const malformedDetail = /^\/api\/v1\/brake\/units\/([^/]+)\/windows(?:\/.*)?$/.exec(url.pathname);
+      if (request.method === "GET" && malformedDetail !== null) {
+        if (this.authorize(decodeURIComponent(malformedDetail[1]!), response) === null) return;
+        sendError(response, 400, "INVALID_REQUEST", "window detail path is invalid", false);
         return;
       }
       sendError(response, 404, "NOT_FOUND", "route was not found", false);
@@ -203,6 +215,34 @@ export class BrakeDataHttp {
       limit,
       items: page.items,
       nextCursor,
+    });
+  }
+
+  private windowDetail(uid: string, encodedEventId: string, url: URL, response: ServerResponse): void {
+    const role = this.authorize(uid, response);
+    if (role === null) return;
+    if ([...url.searchParams.keys()].length !== 0) {
+      sendError(response, 400, "INVALID_REQUEST", "window detail does not accept query parameters", false);
+      return;
+    }
+    const eventId = decodeURIComponent(encodedEventId);
+    if (!UUID4.test(eventId)) {
+      sendError(response, 400, "INVALID_REQUEST", "eventId must be a lowercase UUIDv4", false);
+      return;
+    }
+    const detail = this.storage(() => this.store.queryWindowDetail(uid, eventId));
+    if (detail === null) {
+      sendError(response, 404, "NOT_FOUND", "window was not found", false);
+      return;
+    }
+    sendJson(response, 200, {
+      schemaVersion: 1,
+      contractVersion: "1.0.0",
+      resourceType: "WINDOW_DETAIL",
+      unitSystemUid: uid,
+      unitRole: role,
+      window: detail.window,
+      samples: detail.samples,
     });
   }
 
