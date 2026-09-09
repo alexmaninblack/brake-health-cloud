@@ -57,8 +57,8 @@ export function backendOptionsFromArguments(args: readonly string[]): BackendOpt
 export async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args[0] === "--admin-operation") {
-    if (args.length !== 2 || (args[1] !== "preview" && args[1] !== "execute")) {
-      throw new TypeError("admin operation must be preview or execute");
+    if (args.length !== 2 || (args[1] !== "preview" && args[1] !== "execute" && args[1] !== "empty-proof")) {
+      throw new TypeError("admin operation must be preview, execute or empty-proof");
     }
     const input = await readAdminInput();
     const result = await adminOperation(args[1], input);
@@ -78,11 +78,12 @@ export async function main(): Promise<void> {
 }
 
 /** Private orchestration transport; the CLI never accepts a URL or HTTP method. */
-export function adminOperation(operation: "preview" | "execute", body: string, socketPath = CONTAINER_ADMIN_SOCKET_PATH): Promise<{status: number; body: unknown}> {
-  if (operation !== "preview" && operation !== "execute") throw new TypeError("admin operation is invalid");
+export function adminOperation(operation: "preview" | "execute" | "empty-proof", body: string, socketPath = CONTAINER_ADMIN_SOCKET_PATH): Promise<{status: number; body: unknown}> {
+  if (operation !== "preview" && operation !== "execute" && operation !== "empty-proof") throw new TypeError("admin operation is invalid");
   if (Buffer.byteLength(body, "utf8") > 4096) throw new TypeError("admin input is too large");
   parseJsonRejectDuplicates(body);
-  const path = operation === "preview" ? "/api/v1/brake/admin/current-run/cleanup-preview" : "/api/v1/brake/admin/current-run/cleanup";
+  const path = operation === "empty-proof" ? "/api/v1/brake/admin/storage/empty-proof" :
+    operation === "preview" ? "/api/v1/brake/admin/current-run/cleanup-preview" : "/api/v1/brake/admin/current-run/cleanup";
   return new Promise((resolveResult, reject) => {
     const connection = request({ socketPath, path, method: "POST", headers: {"content-type": "application/json", "content-length": String(Buffer.byteLength(body))} }, (response) => {
       let bytes = "";

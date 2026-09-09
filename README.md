@@ -166,6 +166,38 @@ confirmation token in shell arguments or operational logs. Normal stop retains
 the volume; Retire must reconcile scoped cleanup before any owned volume
 removal. The private Unix socket is not mounted from macOS.
 
+Cancellation before Provision has no Unit UID to select. For this case, the
+same private entrypoint supports `--admin-operation empty-proof`, with exactly
+`{"schemaVersion":1,"contractVersion":"1.0.0"}` on stdin. It calls private
+`POST /api/v1/brake/admin/storage/empty-proof`; no public HTTP equivalent exists.
+The read-only response is:
+
+```json
+{
+  "schemaVersion": 1,
+  "contractVersion": "1.0.0",
+  "state": "EMPTY",
+  "databaseSchemaVersion": 2,
+  "recordCounts": {
+    "messages": 0, "windows": 0, "assessments": 0,
+    "events": 0, "advisories": 0, "quarantine": 0
+  },
+  "observedAt": "2026-09-10T00:00:00.000Z"
+}
+```
+
+Any nonzero counter produces `NONEMPTY`. The proof revalidates the exact
+packaged schema (including absence of unrecognized tables), migration ledger,
+integrity and foreign-key relationships, then counts all six logical product
+categories in one read transaction. It performs no source-database write or
+deletion and returns no records or Unit identifiers. Missing/broken storage
+or an unexpected schema fails closed with `503 TEMPORARILY_UNAVAILABLE`,
+never `EMPTY`; invalid or selector-bearing requests fail with `400`.
+`EMPTY` is a point-in-time observation, not permission to remove an arbitrary
+volume: Demo Control must still prove ownership and quiesce producers before
+removing its never-provisioned run's volume. No state is inferred from an
+unavailable endpoint or a missing context.
+
 This source increment was tested using ephemeral native listeners/databases,
 not Docker. Image assembly, container startup/restart, port isolation and QEMU
 guest routes remain actual qualification steps before any E2E claim.

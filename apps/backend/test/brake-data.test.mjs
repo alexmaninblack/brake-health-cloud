@@ -16,9 +16,9 @@ import {
 } from "../../../out/backend/brake-data-contract.js";
 import { BrakeDataStore } from "../../../out/backend/brake-data-store.js";
 import { BrakeDataHttp } from "../../../out/backend/brake-data-http.js";
-import { applyMigrations, loadMigrations } from "../../../out/backend/migrations.js";
+import { applyMigrations, loadMigrations, validateSchemaV2ReadOnly } from "../../../out/backend/migrations.js";
 import { startBackend } from "../../../out/backend/server.js";
-import { backendOptionsFromArguments } from "../../../out/backend/main.js";
+import { backendOptionsFromArguments, adminOperation } from "../../../out/backend/main.js";
 
 const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
 const migrationsDirectory = join(repositoryRoot, "migrations");
@@ -755,6 +755,92 @@ test("single-Test cleanup explicitly reports a completely empty logical store", 
     assert.deepEqual(cleaned.body.remainingMatchingRecordCounts, zero);
     assert.deepEqual(cleaned.body.nonmatchingRecordCounts, zero);
   }
+});
+
+test("private empty proof works before Provision, rejects selectors and never deletes rows", async (context) => {
+  const directory = mkdtempSync(join(tmpdir(), "brake-empty-proof-"));
+  const databasePath = join(directory, "data.db");
+  const application = await startBackend({
+    databasePath, migrationsDirectory, adminSocketPath: join(directory, "admin.sock"), now: () => NOW,
+  });
+  const database = new DatabaseSync(databasePath);
+  const store = new BrakeDataStore(database);
+  context.after(async () => {
+    database.close();
+    await application.shutdown();
+    rmSync(directory, { recursive: true, force: true });
+  });
+  const body = { schemaVersion: 1, contractVersion: "1.0.0" };
+  const proof = async () => JSON.parse(JSON.stringify(await adminOperation("empty-proof", JSON.stringify(body), application.adminSocketPath)));
+  const zero = { messages: 0, windows: 0, assessments: 0, events: 0, advisories: 0, quarantine: 0 };
+  assert.equal((await http(application.port, "GET", "/health/context")).status, 503);
+  assert.deepEqual(await proof(), {
+    status: 200, body: { ...body, state: "EMPTY", databaseSchemaVersion: 2, recordCounts: zero, observedAt: NOW },
+  });
+  assert.equal((await http(application.port, "POST", "/api/v1/brake/admin/storage/empty-proof", JSON.stringify(body))).status, 404);
+  for (const invalid of [{}, { ...body, systemUids: [TEST_UID] }, { ...body, confirmationToken: null }, { ...body, schemaVersion: 2 }]) {
+    const result = await adminOperation("empty-proof", JSON.stringify(invalid), application.adminSocketPath);
+    assert.equal(result.status, 400);
+    assert.equal(result.body.errorCode, "INVALID_REQUEST");
+  }
+  for (const message of [chunk(0), chunk(1), completion(chunk(0), chunk(1)), assessment(), event(), advisory()]) {
+    assert.equal(store.ingest(parse(message), NOW).httpStatus, 201);
+  }
+  assert.equal(store.ingest(parse({ ...advisory(), serviceArtifactSha256: "9".repeat(64) }), NOW).httpStatus, 409);
+  const before = store.recordSet([TEST_UID]);
+  assert.ok(Object.values(before.counts).every((count) => count > 0));
+  const nonempty = await proof();
+  assert.equal(nonempty.status, 200);
+  assert.equal(nonempty.body.state, "NONEMPTY");
+  assert.deepEqual(nonempty.body.recordCounts, before.counts);
+  assert.deepEqual(Object.keys(nonempty.body).sort(), ["schemaVersion", "contractVersion", "state", "databaseSchemaVersion", "recordCounts", "observedAt"].sort());
+  assert.equal(store.recordSet([TEST_UID]).sha256, before.sha256);
+  assert.equal((await proof()).body.state, "NONEMPTY");
+});
+
+test("empty proof refuses unknown tables, altered schema, ledger and orphan records", async () => {
+  const alterations = [
+    "CREATE TABLE unrecognized_product_data (value TEXT)",
+    "DROP INDEX idx_messages_unit_received",
+    "PRAGMA user_version = 3",
+    "DELETE FROM schema_version WHERE version = 2",
+    "PRAGMA foreign_keys = OFF; INSERT INTO receipts VALUES (999, 'orphan', '2026-08-29T12:00:00Z')",
+  ];
+  for (const alteration of alterations) {
+    const directory = mkdtempSync(join(tmpdir(), "brake-empty-proof-schema-"));
+    const databasePath = join(directory, "data.db");
+    const application = await startBackend({
+      databasePath, migrationsDirectory, adminSocketPath: join(directory, "admin.sock"), now: () => NOW,
+    });
+    const database = new DatabaseSync(databasePath);
+    try {
+      database.exec(alteration);
+      const result = await adminOperation("empty-proof", JSON.stringify({ schemaVersion: 1, contractVersion: "1.0.0" }), application.adminSocketPath);
+      assert.equal(result.status, 503);
+      assert.equal(result.body.errorCode, "TEMPORARILY_UNAVAILABLE");
+      assert.equal("recordCounts" in result.body, false);
+      assert.equal("state" in result.body, false);
+      assert.equal(application.readiness().ready, false);
+    } finally {
+      database.close();
+      await application.shutdown();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test("whole-store proof uses only reads on the source database and requires expected-schema validation", () => {
+  const database = new DatabaseSync(":memory:");
+  const migrations = loadMigrations(migrationsDirectory);
+  applyMigrations(database, migrations, NOW);
+  const store = new BrakeDataStore(database, () => validateSchemaV2ReadOnly(database, migrations));
+  database.exec("PRAGMA query_only = ON");
+  const before = database.prepare("SELECT total_changes() AS count").get().count;
+  assert.ok(Object.values(store.wholeStoreCounts()).every((count) => count === 0));
+  assert.equal(database.prepare("SELECT total_changes() AS count").get().count, before);
+  assert.throws(() => new BrakeDataStore(database).wholeStoreCounts(), /expected schema validator is unavailable/);
+  database.close();
+  assert.throws(() => store.wholeStoreCounts());
 });
 
 test("malformed or Production-only context cannot authorize queries or cleanup", async () => {

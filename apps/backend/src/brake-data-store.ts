@@ -76,9 +76,42 @@ interface SqlRow {
 }
 
 const TABLES = ["messages", "windows", "assessments", "events", "advisories", "quarantine"] as const;
+const PHYSICAL_TABLES = {
+  messages: "messages", windows: "windows", assessments: "assessments",
+  events: "condition_events", advisories: "advisory_facts", quarantine: "quarantine",
+} as const;
 
 export class BrakeDataStore {
-  public constructor(private readonly database: DatabaseSync) {}
+  public constructor(
+    private readonly database: DatabaseSync,
+    private readonly validateReadOnlySchema?: () => void,
+  ) {}
+
+  /** Whole-store counts, without selectors, rows, changes or inferred identity. */
+  public wholeStoreCounts(): RecordCounts {
+    if (this.validateReadOnlySchema === undefined) throw new Error("expected schema validator is unavailable");
+    this.database.exec("BEGIN");
+    try {
+      this.validateReadOnlySchema();
+      if (this.database.prepare("PRAGMA foreign_key_check").get() !== undefined) {
+        throw new Error("database contains inconsistent relationships");
+      }
+      const counts: { -readonly [Key in keyof RecordCounts]: number } = zeroCounts();
+      for (const table of TABLES) {
+        const row = this.database.prepare(`SELECT COUNT(*) AS count FROM ${PHYSICAL_TABLES[table]}`).get() as SqlRow | undefined;
+        const count = row?.count;
+        if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 0) {
+          throw new Error("whole-store record count is invalid");
+        }
+        counts[table] = count;
+      }
+      this.database.exec("COMMIT");
+      return counts;
+    } catch (error) {
+      rollbackIfActive(this.database);
+      throw error;
+    }
+  }
 
   public ingest(message: ParsedBrakeMessage, receivedAt: string): IngestResult {
     this.database.exec("BEGIN IMMEDIATE");

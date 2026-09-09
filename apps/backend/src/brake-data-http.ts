@@ -140,6 +140,10 @@ export class BrakeDataHttp {
       const value = object(parseJsonRejectDuplicates(raw));
       this.refreshContext();
       const path = new URL(request.url ?? "/", "http://local").pathname;
+      if (path === "/api/v1/brake/admin/storage/empty-proof") {
+        this.emptyProof(value, response);
+        return;
+      }
       if (path === "/api/v1/brake/admin/current-run/cleanup-preview") {
         this.preview(value, response);
         return;
@@ -262,6 +266,19 @@ export class BrakeDataHttp {
       this.subscribers.delete(subscriber);
       response.destroy();
     }
+  }
+
+  private emptyProof(value: Readonly<Record<string, JsonValue>>, response: ServerResponse): void {
+    if (Object.keys(value).sort().join("|") !== "contractVersion|schemaVersion" ||
+        value.schemaVersion !== 1 || value.contractVersion !== "1.0.0") {
+      throw new HttpRequestError("INVALID_REQUEST", "empty proof requires only the supported schema and contract versions");
+    }
+    const counts = this.storage(() => this.store.wholeStoreCounts());
+    sendJson(response, 200, {
+      schemaVersion: 1, contractVersion: "1.0.0", databaseSchemaVersion: 2,
+      state: Object.values(counts).every((count) => count === 0) ? "EMPTY" : "NONEMPTY",
+      recordCounts: counts, observedAt: this.now(),
+    });
   }
 
   private preview(value: Readonly<Record<string, JsonValue>>, response: ServerResponse): void {

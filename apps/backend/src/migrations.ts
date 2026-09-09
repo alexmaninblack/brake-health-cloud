@@ -133,6 +133,22 @@ export function validateSchemaV2(
   database: DatabaseSync,
   migrations: readonly Migration[],
 ): void {
+  validateSchemaV2Internal(database, migrations, true);
+}
+
+/** Recheck the packaged schema and integrity without writing to the source database. */
+export function validateSchemaV2ReadOnly(
+  database: DatabaseSync,
+  migrations: readonly Migration[],
+): void {
+  validateSchemaV2Internal(database, migrations, false);
+}
+
+function validateSchemaV2Internal(
+  database: DatabaseSync,
+  migrations: readonly Migration[],
+  probeWrites: boolean,
+): void {
   try {
     if (migrations.length !== 2 || migrations[0]?.version !== 1 || migrations[0]?.name !== "initialize" ||
         migrations[1]?.version !== 2 || migrations[1]?.name !== "brake_data" || readSchemaVersion(database) !== 2) {
@@ -160,11 +176,11 @@ export function validateSchemaV2(
       reference.close();
     }
 
-    const integrity = database.prepare("PRAGMA integrity_check").all() as Array<{ integrity_check: string }>;
+    const integrity = database.prepare("PRAGMA integrity_check(1)").all() as Array<{ integrity_check: string }>;
     if (integrity.length !== 1 || integrity[0]?.integrity_check !== "ok") {
       throw new Error("database integrity check failed");
     }
-    probeReadWriteTransaction(database, ledger[1]!.applied_at);
+    if (probeWrites) probeReadWriteTransaction(database, ledger[1]!.applied_at);
   } catch (error) {
     if (error instanceof MigrationError && error.code === "SCHEMA_VALIDATION_FAILED") throw error;
     throw new MigrationError("SCHEMA_VALIDATION_FAILED", "database failed exact v2 readiness validation", { cause: error });

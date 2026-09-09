@@ -9,7 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import { BrakeDataHttp, type CurrentUnitContextInput, type QueryReadiness } from "./brake-data-http.js";
 import { BrakeDataStore } from "./brake-data-store.js";
-import { applyMigrations, loadMigrations, MigrationError, validateSchemaV2 } from "./migrations.js";
+import { applyMigrations, loadMigrations, MigrationError, validateSchemaV2, validateSchemaV2ReadOnly } from "./migrations.js";
 
 export const LOOPBACK_HOST = "127.0.0.1";
 export const CONTAINER_HOST = "0.0.0.0";
@@ -78,8 +78,9 @@ export async function startBackend(options: BackendOptions = {}): Promise<Backen
     const migrations = loadMigrations(migrationsDirectory);
     const schemaVersion = applyMigrations(database, migrations, now());
     validateSchemaV2(database, migrations);
+    const validatedDatabase = database;
     dataHttp = new BrakeDataHttp(
-      new BrakeDataStore(database), options.currentUnitContext, now, options.cleanupHmacKey,
+      new BrakeDataStore(database, () => validateSchemaV2ReadOnly(validatedDatabase, migrations)), options.currentUnitContext, now, options.cleanupHmacKey,
       () => {
         readiness.ready = false;
         readiness.reason = "DATABASE_UNAVAILABLE";
