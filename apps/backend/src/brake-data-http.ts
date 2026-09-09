@@ -271,6 +271,7 @@ export class BrakeDataHttp {
       return;
     }
     const summary = this.storage(() => this.store.recordSet(systemUids));
+    const nonmatching = this.storage(() => this.store.recordSet(systemUids, false));
     const expiresAt = new Date(Date.parse(this.now()) + 60_000).toISOString();
     const payload: JsonValue = [
       "brake-cleanup-preview-v1", [...systemUids], countsJson(summary.counts), summary.sha256, expiresAt,
@@ -280,6 +281,7 @@ export class BrakeDataHttp {
     sendJson(response, 200, {
       schemaVersion: 1, contractVersion: "1.0.0", systemUids,
       recordCounts: summary.counts, recordSetSha256: summary.sha256,
+      nonmatchingRecordCounts: nonmatching.counts,
       confirmationToken: `v1.${encoded}.${mac}`, expiresAt,
     });
   }
@@ -322,6 +324,7 @@ export class BrakeDataHttp {
       deletedRecordCounts: result.deleted,
       remainingMatchingRecordCounts: result.remaining,
       nonmatchingRecordSetSha256: result.nonmatchingSha256,
+      nonmatchingRecordCounts: result.nonmatchingCounts,
       completedAt: this.now(),
     });
   }
@@ -365,11 +368,15 @@ export class BrakeDataHttp {
       : ["schemaVersion", "contractVersion", "systemUids"];
     if (Object.keys(value).sort().join("|") !== allowed.sort().join("|") ||
         value.schemaVersion !== 1 || value.contractVersion !== "1.0.0" ||
-        !Array.isArray(value.systemUids) || value.systemUids.length !== this.sortedSystemUids.length ||
-        value.systemUids.some((uid, index) => uid !== this.sortedSystemUids![index])) {
-      throw new HttpRequestError("INVALID_REQUEST", "cleanup selector must be the exact sorted current Unit UIDs");
+        !Array.isArray(value.systemUids)) {
+      throw new HttpRequestError("INVALID_REQUEST", "cleanup selector must be the current Test UID or all sorted current Unit UIDs");
     }
-    return this.sortedSystemUids;
+    const selected = value.systemUids;
+    if (selected.length === 1 && typeof selected[0] === "string" &&
+        this.currentUnits?.get(selected[0]) === "VALIDATION") return [selected[0]];
+    if (selected.length === this.sortedSystemUids.length &&
+        selected.every((uid, index) => uid === this.sortedSystemUids![index])) return this.sortedSystemUids;
+    throw new HttpRequestError("INVALID_REQUEST", "cleanup selector must be the current Test UID or all sorted current Unit UIDs");
   }
 
   private authorize(uid: string, response: ServerResponse): "VALIDATION" | "PRODUCTION" | null {

@@ -645,6 +645,8 @@ test("Test-only query and cleanup leave Production and unrelated data intact", a
   assert.equal(result.status, 200);
   assert.equal(result.body.remainingMatchingRecordCounts.messages, 0);
   assert.equal(result.body.nonmatchingRecordSetSha256, nonmatchingBefore);
+  assert.deepEqual(result.body.nonmatchingRecordCounts, preview.body.nonmatchingRecordCounts);
+  assert.equal(result.body.nonmatchingRecordCounts.messages, 2);
   assert.equal(store.query("ADVISORY", PRODUCTION_UID, 50, null).items.length, 1);
   assert.equal(store.query("ADVISORY", "unrelated-unit", 50, null).items.length, 1);
   const emptyPreview = await unix(socketPath, "/api/v1/brake/admin/current-run/cleanup-preview", selector);
@@ -654,6 +656,105 @@ test("Test-only query and cleanup leave Production and unrelated data intact", a
   assert.equal(empty.status, 200);
   assert.equal(empty.body.deletedRecordCounts.messages, 0);
   database.close();
+});
+
+test("Test cleanup in a dual context preserves Production context and nonmatching rows", async (context) => {
+  const directory = mkdtempSync(join(tmpdir(), "brake-scoped-retire-"));
+  const databasePath = join(directory, "data.db");
+  const socketPath = join(directory, "admin.sock");
+  const injected = currentContext();
+  const application = await startBackend({
+    adminSocketPath: socketPath, databasePath, migrationsDirectory,
+    currentUnitContext: () => injected, now: () => NOW,
+  });
+  const database = new DatabaseSync(databasePath);
+  const store = new BrakeDataStore(database);
+  context.after(async () => {
+    database.close();
+    await application.shutdown();
+    rmSync(directory, { recursive: true, force: true });
+  });
+  for (const [unitSystemUid, unitRole] of [[TEST_UID, "VALIDATION"], [PRODUCTION_UID, "PRODUCTION"], ["unrelated-unit", "VALIDATION"]]) {
+    assert.equal(store.ingest(parse(digest({ ...advisory(), unitSystemUid, unitRole })), NOW).httpStatus, 201);
+  }
+  for (const message of [chunk(0), chunk(1), completion(chunk(0), chunk(1)), assessment(), event()]) {
+    assert.equal(store.ingest(parse(message), NOW).httpStatus, 201);
+  }
+  assert.equal(store.ingest(parse({ ...advisory(), serviceArtifactSha256: "9".repeat(64) }), NOW).httpStatus, 409);
+  const all = { schemaVersion: 1, contractVersion: "1.0.0", systemUids: [TEST_UID, PRODUCTION_UID].sort() };
+  const selector = { ...all, systemUids: [TEST_UID] };
+  const routes = {
+    preview: "/api/v1/brake/admin/current-run/cleanup-preview",
+    execute: "/api/v1/brake/admin/current-run/cleanup",
+  };
+  const preview = await unix(socketPath, routes.preview, selector);
+  assert.equal(preview.status, 200);
+  assert.ok(Object.values(preview.body.recordCounts).every((count) => count > 0));
+  assert.equal(preview.body.nonmatchingRecordCounts.messages, 2);
+  const fullPreview = await unix(socketPath, routes.preview, all);
+  assert.equal(fullPreview.status, 200);
+  for (const [request, token] of [[selector, fullPreview.body.confirmationToken], [all, preview.body.confirmationToken]]) {
+    const mismatch = await unix(socketPath, routes.execute, { ...request, confirmationToken: token });
+    assert.equal(mismatch.status, 409);
+    assert.equal(mismatch.body.errorCode, "PREVIEW_TOKEN_EXPIRED");
+  }
+  for (const systemUids of [[], [TEST_UID, TEST_UID], [PRODUCTION_UID], ["*"], ["unrelated-unit"], [TEST_UID, "unrelated-unit"], [TEST_UID, PRODUCTION_UID, "third"], [...all.systemUids].reverse()]) {
+    for (const [path, token] of [[routes.preview, {}], [routes.execute, { confirmationToken: preview.body.confirmationToken }]]) {
+      const invalid = await unix(socketPath, path, { ...selector, systemUids, ...token });
+      assert.equal(invalid.status, 400);
+      assert.equal(invalid.body.errorCode, "INVALID_REQUEST");
+    }
+  }
+  // An unrelated new record does not invalidate the Test-only preview.
+  assert.equal(store.ingest(parse({ ...chunk(0), unitSystemUid: PRODUCTION_UID, unitRole: "PRODUCTION" }), NOW).httpStatus, 201);
+  const nonmatchingBefore = store.recordSet([TEST_UID], false);
+  const cleaned = await unix(socketPath, routes.execute, { ...selector, confirmationToken: preview.body.confirmationToken });
+  assert.equal(cleaned.status, 200);
+  assert.deepEqual(cleaned.body.deletedRecordCounts, preview.body.recordCounts);
+  assert.ok(Object.values(cleaned.body.remainingMatchingRecordCounts).every((count) => count === 0));
+  assert.deepEqual(cleaned.body.nonmatchingRecordCounts, nonmatchingBefore.counts);
+  assert.equal(cleaned.body.nonmatchingRecordSetSha256, nonmatchingBefore.sha256);
+  assert.equal(cleaned.body.nonmatchingRecordCounts.messages, 3);
+  assert.deepEqual((await http(application.port, "GET", "/health/context")).body.systemUids, all.systemUids);
+  assert.equal((await http(application.port, "GET", `/api/v1/brake/units/${PRODUCTION_UID}/advisories`)).body.items.length, 1);
+  assert.equal(store.query("ADVISORY", "unrelated-unit", 50, null).items.length, 1);
+
+  // A token cannot authorize an old Test after the trusted context rotates.
+  const emptyPreview = await unix(socketPath, routes.preview, selector);
+  injected.testUnit.systemUid = "next-test";
+  const obsolete = await unix(socketPath, routes.execute, { ...selector, confirmationToken: emptyPreview.body.confirmationToken });
+  assert.equal(obsolete.status, 400);
+  assert.equal(obsolete.body.errorCode, "INVALID_REQUEST");
+  assert.equal(store.recordSet([TEST_UID], false).sha256, nonmatchingBefore.sha256);
+});
+
+test("single-Test cleanup explicitly reports a completely empty logical store", async (context) => {
+  const directory = mkdtempSync(join(tmpdir(), "brake-retire-empty-"));
+  const socketPath = join(directory, "admin.sock");
+  const injected = currentContext();
+  delete injected.productionUnit;
+  const application = await startBackend({
+    adminSocketPath: socketPath, migrationsDirectory, currentUnitContext: injected, now: () => NOW,
+  });
+  context.after(async () => {
+    await application.shutdown();
+    rmSync(directory, { recursive: true, force: true });
+  });
+  assert.equal((await http(application.port, "POST", "/api/v1/brake/messages", JSON.stringify(advisory()))).status, 201);
+  const selector = { schemaVersion: 1, contractVersion: "1.0.0", systemUids: [TEST_UID] };
+  const zero = { messages: 0, windows: 0, assessments: 0, events: 0, advisories: 0, quarantine: 0 };
+  for (const cycle of [1, 2]) {
+    const preview = await unix(socketPath, "/api/v1/brake/admin/current-run/cleanup-preview", selector);
+    assert.equal(preview.status, 200);
+    assert.equal(preview.body.recordCounts.messages, cycle === 1 ? 1 : 0);
+    assert.deepEqual(preview.body.nonmatchingRecordCounts, zero);
+    const cleaned = await unix(socketPath, "/api/v1/brake/admin/current-run/cleanup", {
+      ...selector, confirmationToken: preview.body.confirmationToken,
+    });
+    assert.equal(cleaned.status, 200);
+    assert.deepEqual(cleaned.body.remainingMatchingRecordCounts, zero);
+    assert.deepEqual(cleaned.body.nonmatchingRecordCounts, zero);
+  }
 });
 
 test("malformed or Production-only context cannot authorize queries or cleanup", async () => {

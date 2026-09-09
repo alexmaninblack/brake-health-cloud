@@ -77,15 +77,28 @@ obsolete SSE subscriptions before further notifications are emitted.
 
 The two existing admin routes remain available **only** on the mode-0600 Unix
 socket: `POST /api/v1/brake/admin/current-run/cleanup-preview` and
-`POST /api/v1/brake/admin/current-run/cleanup`. Their selector is the exact
-sorted `systemUids` list from the injected context: one Test UID, or both UIDs
-for the dual-role engineering flow. Empty, duplicate, wildcard, foreign and
-partial selectors are rejected. Confirmation-token, expiry, row-set digest,
+`POST /api/v1/brake/admin/current-run/cleanup`. Their `systemUids` selector is
+either the exact current Test UID (also when Production is present), or the
+exact sorted full current-context list for the dual-role engineering flow.
+Production-only, empty, duplicate, wildcard, foreign and other partial
+selectors are rejected. Confirmation-token, expiry, row-set digest,
 transaction and nonmatching-data preservation semantics are unchanged.
 
+Preview and execute return `nonmatchingRecordCounts`, using the same six
+counters as matching records: `messages`, `windows`, `assessments`, `events`,
+`advisories` and `quarantine`. Preview counts are observations, not part of the
+confirmation token; changes to unrelated records do not make a Test preview
+stale. Execute returns transactional post-cleanup counts alongside the
+unchanged nonmatching digest. A successful Test cleanup does not mean the
+whole store is empty: both `remainingMatchingRecordCounts` and
+`nonmatchingRecordCounts` must be all zero for that conclusion. Preserve the
+volume if nonmatching data remains.
+
 For Retire, Demo Control retains the retiring UID context until scoped cleanup
-has confirmed zero matching records, then clears the context and stops the
-process. Clearing context is not data deletion. A new cycle cannot query an
+has confirmed zero matching records, then clears only the retired scope;
+peer context and its backend owner remain when still required. The cleanup
+operation itself does not mutate context or stop a process. Clearing context
+is not data deletion. A new cycle cannot query an
 earlier Unit's records merely because the database still exists.
 
 ## Commands
@@ -145,8 +158,9 @@ docker exec --interactive aosedge-demo-brake-cloud node /app/out/backend/main.js
 
 Demo Control supplies the accepted bounded cleanup JSON on stdin and captures
 `{"status":HTTP_STATUS,"body":RESPONSE}` privately. Preview requires
-`schemaVersion: 1`, `contractVersion: "1.0.0"` and the exact sorted current
-`systemUids`; execute additionally requires the returned `confirmationToken`.
+`schemaVersion: 1`, `contractVersion: "1.0.0"` and an accepted exact current
+`systemUids` scope as defined above; execute additionally requires the returned
+`confirmationToken`.
 The CLI accepts no caller-selected URL, method or socket path. Never put the
 confirmation token in shell arguments or operational logs. Normal stop retains
 the volume; Retire must reconcile scoped cleanup before any owned volume

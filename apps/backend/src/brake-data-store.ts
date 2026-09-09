@@ -68,6 +68,7 @@ export interface DeleteResult {
   readonly deleted: RecordCounts;
   readonly remaining: RecordCounts;
   readonly nonmatchingSha256: string;
+  readonly nonmatchingCounts: RecordCounts;
 }
 
 interface SqlRow {
@@ -249,11 +250,13 @@ export class BrakeDataStore {
       const current = this.recordSet(systemUids);
       if (current.sha256 !== expectedRecordSetSha256) {
         this.database.exec("ROLLBACK");
+        const nonmatching = this.recordSet(systemUids, false);
         return {
           stale: true,
           deleted: zeroCounts(),
           remaining: current.counts,
-          nonmatchingSha256: this.recordSet(systemUids, false).sha256,
+          nonmatchingSha256: nonmatching.sha256,
+          nonmatchingCounts: nonmatching.counts,
         };
       }
       const nonmatchingBefore = this.recordSet(systemUids, false).sha256;
@@ -261,8 +264,8 @@ export class BrakeDataStore {
       this.database.prepare(`DELETE FROM quarantine WHERE unit_system_uid IN (${placeholders})`).run(...systemUids);
       this.database.prepare(`DELETE FROM messages WHERE unit_system_uid IN (${placeholders})`).run(...systemUids);
       const remaining = this.recordSet(systemUids).counts;
-      const nonmatchingAfter = this.recordSet(systemUids, false).sha256;
-      if (!allZero(remaining) || nonmatchingAfter !== nonmatchingBefore) {
+      const nonmatchingAfter = this.recordSet(systemUids, false);
+      if (!allZero(remaining) || nonmatchingAfter.sha256 !== nonmatchingBefore) {
         throw new Error("cleanup postcondition failed");
       }
       this.database.exec("COMMIT");
@@ -270,7 +273,8 @@ export class BrakeDataStore {
         stale: false,
         deleted: current.counts,
         remaining,
-        nonmatchingSha256: nonmatchingAfter,
+        nonmatchingSha256: nonmatchingAfter.sha256,
+        nonmatchingCounts: nonmatchingAfter.counts,
       };
     } catch (error) {
       rollbackIfActive(this.database);
