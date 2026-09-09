@@ -4,7 +4,7 @@
 export { ADMIN_SOCKET_PATH, LOOPBACK_HOST, startBackend } from "./server.js";
 export type { BackendApplication, BackendOptions } from "./server.js";
 export { BrakeDataHttp } from "./brake-data-http.js";
-export type { CurrentUnitContext } from "./brake-data-http.js";
+export type { CurrentUnitContext, CurrentUnitContextInput, QueryReadiness } from "./brake-data-http.js";
 export {
   canonicalize,
   ContractError,

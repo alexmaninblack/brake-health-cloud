@@ -24,11 +24,19 @@ export interface CurrentUnitContext {
     readonly unitRole: "VALIDATION";
     readonly userFacingRole: "Test Vehicle";
   };
-  readonly productionUnit: {
+  readonly productionUnit?: {
     readonly systemUid: string;
     readonly unitRole: "PRODUCTION";
     readonly userFacingRole: "Production Vehicle";
   };
+}
+
+export type CurrentUnitContextInput = CurrentUnitContext | (() => CurrentUnitContext | undefined);
+
+export interface QueryReadiness {
+  readonly ready: boolean;
+  readonly reason: "READY" | "CURRENT_UNIT_CONTEXT_UNAVAILABLE" | "TEMPORARILY_UNAVAILABLE";
+  readonly systemUids: readonly string[];
 }
 
 type ErrorCode =
@@ -61,27 +69,32 @@ class StorageError extends Error {
 }
 
 export class BrakeDataHttp {
-  private readonly currentUnits: ReadonlyMap<string, "VALIDATION" | "PRODUCTION"> | null;
-  private readonly sortedSystemUids: readonly [string, string] | null;
+  private currentUnits: ReadonlyMap<string, "VALIDATION" | "PRODUCTION"> | null = null;
+  private sortedSystemUids: readonly string[] | null = null;
   private readonly subscribers = new Set<Subscriber>();
   private eventId = 0n;
   private storageAvailable = true;
 
   public constructor(
     private readonly store: BrakeDataStore,
-    context: CurrentUnitContext | undefined,
+    private readonly context: CurrentUnitContextInput | undefined,
     private readonly now: () => string = () => new Date().toISOString(),
     private readonly hmacKey: Uint8Array = randomBytes(32),
     private readonly onStorageFailure: () => void = () => undefined,
   ) {
-    const validated = validateContext(context);
-    this.currentUnits = validated;
-    this.sortedSystemUids = validated === null
-      ? null
-      : [...validated.keys()].sort() as [string, string];
+    this.refreshContext();
+  }
+
+  public queryReadiness(): QueryReadiness {
+    this.refreshContext();
+    if (!this.storageAvailable) return { ready: false, reason: "TEMPORARILY_UNAVAILABLE", systemUids: [] };
+    return this.sortedSystemUids === null
+      ? { ready: false, reason: "CURRENT_UNIT_CONTEXT_UNAVAILABLE", systemUids: [] }
+      : { ready: true, reason: "READY", systemUids: [...this.sortedSystemUids] };
   }
 
   public async handlePublic(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    this.refreshContext();
     if (!this.storageAvailable) {
       sendError(response, 503, "TEMPORARILY_UNAVAILABLE", "data service is temporarily unavailable", true);
       return;
@@ -125,6 +138,7 @@ export class BrakeDataHttp {
       }
       const raw = await readBody(request, ADMIN_MAXIMUM, false);
       const value = object(parseJsonRejectDuplicates(raw));
+      this.refreshContext();
       const path = new URL(request.url ?? "/", "http://local").pathname;
       if (path === "/api/v1/brake/admin/current-run/cleanup-preview") {
         this.preview(value, response);
@@ -143,6 +157,25 @@ export class BrakeDataHttp {
   public closeStreams(): void {
     for (const subscriber of this.subscribers) subscriber.response.destroy();
     this.subscribers.clear();
+  }
+
+  private refreshContext(): void {
+    let validated: ReadonlyMap<string, "VALIDATION" | "PRODUCTION"> | null;
+    try {
+      validated = validateContext(typeof this.context === "function" ? this.context() : this.context);
+    } catch {
+      // Missing, malformed or temporarily unreadable injected context is not
+      // permission to reuse an earlier Unit identity or infer one from records.
+      validated = null;
+    }
+    this.currentUnits = validated;
+    this.sortedSystemUids = validated === null ? null : [...validated.keys()].sort();
+    for (const subscriber of this.subscribers) {
+      if (!validated?.has(subscriber.systemUid)) {
+        subscriber.response.destroy();
+        this.subscribers.delete(subscriber);
+      }
+    }
   }
 
   private async ingest(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -294,7 +327,7 @@ export class BrakeDataHttp {
   }
 
   private verifyToken(token: string): {
-    systemUids: readonly [string, string]; counts: RecordCounts; digest: string; expiresAt: string;
+    systemUids: readonly string[]; counts: RecordCounts; digest: string; expiresAt: string;
   } | null {
     try {
       const parts = token.split(".");
@@ -305,14 +338,15 @@ export class BrakeDataHttp {
       if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) return null;
       const payload = parseJsonRejectDuplicates(Buffer.from(parts[1]!, "base64url").toString("utf8"));
       if (!Array.isArray(payload) || payload.length !== 5 || payload[0] !== "brake-cleanup-preview-v1" ||
-          !Array.isArray(payload[1]) || payload[1].length !== 2 ||
-          !payload[1].every((item) => typeof item === "string") ||
+          !Array.isArray(payload[1]) || payload[1].length < 1 || payload[1].length > 2 ||
+          !payload[1].every((item) => typeof item === "string" && UID.test(item)) ||
+          new Set(payload[1]).size !== payload[1].length ||
           !validCounts(payload[2]) ||
           typeof payload[3] !== "string" || !/^[0-9a-f]{64}$/.test(payload[3]) ||
           typeof payload[4] !== "string" || !Number.isFinite(Date.parse(payload[4])) ||
           Buffer.from(canonicalize(payload)).toString("base64url") !== parts[1]) return null;
       return {
-        systemUids: payload[1] as [string, string],
+        systemUids: payload[1] as string[],
         counts: payload[2],
         digest: payload[3], expiresAt: payload[4],
       };
@@ -324,15 +358,15 @@ export class BrakeDataHttp {
   private cleanupSelector(
     value: Readonly<Record<string, JsonValue>>,
     execute: boolean,
-  ): readonly [string, string] | null {
+  ): readonly string[] | null {
     if (this.sortedSystemUids === null) return null;
     const allowed = execute
       ? ["schemaVersion", "contractVersion", "systemUids", "confirmationToken"]
       : ["schemaVersion", "contractVersion", "systemUids"];
     if (Object.keys(value).sort().join("|") !== allowed.sort().join("|") ||
         value.schemaVersion !== 1 || value.contractVersion !== "1.0.0" ||
-        !Array.isArray(value.systemUids) || value.systemUids.length !== 2 ||
-        value.systemUids[0] !== this.sortedSystemUids[0] || value.systemUids[1] !== this.sortedSystemUids[1]) {
+        !Array.isArray(value.systemUids) || value.systemUids.length !== this.sortedSystemUids.length ||
+        value.systemUids.some((uid, index) => uid !== this.sortedSystemUids![index])) {
       throw new HttpRequestError("INVALID_REQUEST", "cleanup selector must be the exact sorted current Unit UIDs");
     }
     return this.sortedSystemUids;
@@ -352,6 +386,7 @@ export class BrakeDataHttp {
   }
 
   private notify(systemUid: string, resources: readonly ChangedResource[]): void {
+    this.refreshContext();
     if (resources.length === 0) return;
     const changedResources = [...new Set(resources)].sort();
     for (const subscriber of this.subscribers) {
@@ -410,20 +445,26 @@ function validateContext(context: CurrentUnitContext | undefined): ReadonlyMap<s
   if (typeof context !== "object" || context === null) return null;
   const testUnit = context.testUnit;
   const productionUnit = context.productionUnit;
-  if (typeof testUnit !== "object" || testUnit === null || typeof productionUnit !== "object" || productionUnit === null ||
+  const expectedKeys = productionUnit === undefined
+    ? "contractVersion|schemaVersion|source|testUnit"
+    : "contractVersion|productionUnit|schemaVersion|source|testUnit";
+  if (typeof testUnit !== "object" || testUnit === null ||
       context.schemaVersion !== 1 || context.contractVersion !== "1.0.0" ||
       context.source !== "CURRENT_RUN_PROVISIONING_JOURNAL" ||
       testUnit.unitRole !== "VALIDATION" || testUnit.userFacingRole !== "Test Vehicle" ||
-      productionUnit.unitRole !== "PRODUCTION" || productionUnit.userFacingRole !== "Production Vehicle" ||
-      !UID.test(testUnit.systemUid) || !UID.test(productionUnit.systemUid) ||
-      testUnit.systemUid === productionUnit.systemUid ||
-      Object.keys(context).sort().join("|") !== "contractVersion|productionUnit|schemaVersion|source|testUnit" ||
-      Object.keys(testUnit).sort().join("|") !== "systemUid|unitRole|userFacingRole" ||
-      Object.keys(productionUnit).sort().join("|") !== "systemUid|unitRole|userFacingRole") return null;
-  return new Map([
-    [testUnit.systemUid, "VALIDATION"],
-    [productionUnit.systemUid, "PRODUCTION"],
-  ]);
+      typeof testUnit.systemUid !== "string" || !UID.test(testUnit.systemUid) ||
+      Object.keys(context).sort().join("|") !== expectedKeys ||
+      Object.keys(testUnit).sort().join("|") !== "systemUid|unitRole|userFacingRole") return null;
+  const units = new Map<string, "VALIDATION" | "PRODUCTION">([[testUnit.systemUid, "VALIDATION"]]);
+  if (productionUnit !== undefined) {
+    if (typeof productionUnit !== "object" || productionUnit === null ||
+        productionUnit.unitRole !== "PRODUCTION" || productionUnit.userFacingRole !== "Production Vehicle" ||
+        typeof productionUnit.systemUid !== "string" || !UID.test(productionUnit.systemUid) ||
+        testUnit.systemUid === productionUnit.systemUid ||
+        Object.keys(productionUnit).sort().join("|") !== "systemUid|unitRole|userFacingRole") return null;
+    units.set(productionUnit.systemUid, "PRODUCTION");
+  }
+  return units;
 }
 
 function resourceFor(plural: string): QueryResource {

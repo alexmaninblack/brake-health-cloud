@@ -176,9 +176,10 @@ export class BrakeDataStore {
     }
   }
 
-  public recordSet(systemUids: readonly [string, string], matching = true): RecordSetSummary {
-    const predicate = matching ? "IN (?, ?)" : "NOT IN (?, ?)";
-    const parameters = [systemUids[0], systemUids[1]] as const;
+  public recordSet(systemUids: readonly string[], matching = true): RecordSetSummary {
+    const placeholders = unitPlaceholders(systemUids);
+    const predicate = `${matching ? "IN" : "NOT IN"} (${placeholders})`;
+    const parameters = systemUids;
     const messages = this.rows(
       "SELECT m.unit_system_uid, m.message_type, m.message_identity, m.message_key_sha256, " +
         "m.content_sha256, m.canonical_message_sha256, m.backend_received_at, r.receipt_id, r.received_at " +
@@ -239,9 +240,10 @@ export class BrakeDataStore {
   }
 
   public deleteMatching(
-    systemUids: readonly [string, string],
+    systemUids: readonly string[],
     expectedRecordSetSha256: string,
   ): DeleteResult {
+    const placeholders = unitPlaceholders(systemUids);
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const current = this.recordSet(systemUids);
@@ -255,9 +257,9 @@ export class BrakeDataStore {
         };
       }
       const nonmatchingBefore = this.recordSet(systemUids, false).sha256;
-      this.database.prepare("DELETE FROM windows WHERE unit_system_uid IN (?, ?)").run(...systemUids);
-      this.database.prepare("DELETE FROM quarantine WHERE unit_system_uid IN (?, ?)").run(...systemUids);
-      this.database.prepare("DELETE FROM messages WHERE unit_system_uid IN (?, ?)").run(...systemUids);
+      this.database.prepare(`DELETE FROM windows WHERE unit_system_uid IN (${placeholders})`).run(...systemUids);
+      this.database.prepare(`DELETE FROM quarantine WHERE unit_system_uid IN (${placeholders})`).run(...systemUids);
+      this.database.prepare(`DELETE FROM messages WHERE unit_system_uid IN (${placeholders})`).run(...systemUids);
       const remaining = this.recordSet(systemUids).counts;
       const nonmatchingAfter = this.recordSet(systemUids, false).sha256;
       if (!allZero(remaining) || nonmatchingAfter !== nonmatchingBefore) {
@@ -691,6 +693,15 @@ function messageIdentity(message: Readonly<Record<string, JsonValue>>): string {
     default:
       throw new TypeError("stored message type is invalid");
   }
+}
+
+function unitPlaceholders(systemUids: readonly string[]): string {
+  if (systemUids.length < 1 || systemUids.length > 2 ||
+      new Set(systemUids).size !== systemUids.length ||
+      systemUids.some((uid) => typeof uid !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(uid))) {
+    throw new TypeError("record selector requires one or two distinct exact Unit UIDs");
+  }
+  return systemUids.map(() => "?").join(", ");
 }
 
 function objectJson(value: string): Readonly<Record<string, JsonValue>> {

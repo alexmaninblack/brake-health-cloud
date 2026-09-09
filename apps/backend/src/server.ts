@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-import { BrakeDataHttp, type CurrentUnitContext } from "./brake-data-http.js";
+import { BrakeDataHttp, type CurrentUnitContextInput, type QueryReadiness } from "./brake-data-http.js";
 import { BrakeDataStore } from "./brake-data-store.js";
 import { applyMigrations, loadMigrations, MigrationError, validateSchemaV2 } from "./migrations.js";
 
@@ -21,7 +21,7 @@ export interface BackendOptions {
   readonly databasePath?: string;
   readonly host?: typeof LOOPBACK_HOST;
   readonly migrationsDirectory?: string;
-  readonly currentUnitContext?: CurrentUnitContext;
+  readonly currentUnitContext?: CurrentUnitContextInput;
   readonly adminSocketPath?: string;
   readonly cleanupHmacKey?: Uint8Array;
   readonly now?: () => string;
@@ -38,6 +38,7 @@ export interface BackendApplication {
     readonly reason: ReadinessReason;
     readonly schemaVersion: number | null;
   };
+  readonly queryReadiness: () => QueryReadiness;
   readonly shutdown: () => Promise<void>;
 }
 
@@ -90,6 +91,9 @@ export async function startBackend(options: BackendOptions = {}): Promise<Backen
       : error instanceof MigrationError ? "MIGRATION_FAILED" : "DATABASE_UNAVAILABLE";
   }
 
+  const queryReadiness = (): QueryReadiness => dataHttp?.queryReadiness() ?? {
+    ready: false, reason: "TEMPORARILY_UNAVAILABLE", systemUids: [],
+  };
   const publicServer = createServer((request, response) => {
     response.setHeader("cache-control", "no-store");
     if (request.method === "GET" && request.url === "/health/live") {
@@ -98,6 +102,9 @@ export async function startBackend(options: BackendOptions = {}): Promise<Backen
       json(response, readiness.ready ? 200 : 503, {
         ready: readiness.ready, reason: readiness.reason, schemaVersion: readiness.schemaVersion,
       });
+    } else if (request.method === "GET" && request.url === "/health/context") {
+      const context = queryReadiness();
+      json(response, context.ready ? 200 : 503, context);
     } else if (dataHttp !== undefined && readiness.ready) {
       void dataHttp.handlePublic(request, response);
     } else {
@@ -135,6 +142,7 @@ export async function startBackend(options: BackendOptions = {}): Promise<Backen
     adminSocketPath: adminServer === undefined ? null : adminSocketPath,
     databasePath, host, port: address.port,
     readiness: () => ({ ...readiness }),
+    queryReadiness,
     shutdown: async () => {
       if (stopped) return;
       stopped = true;

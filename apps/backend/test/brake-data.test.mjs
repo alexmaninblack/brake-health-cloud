@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +18,7 @@ import { BrakeDataStore } from "../../../out/backend/brake-data-store.js";
 import { BrakeDataHttp } from "../../../out/backend/brake-data-http.js";
 import { applyMigrations, loadMigrations } from "../../../out/backend/migrations.js";
 import { startBackend } from "../../../out/backend/server.js";
+import { backendOptionsFromArguments } from "../../../out/backend/main.js";
 
 const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
 const migrationsDirectory = join(repositoryRoot, "migrations");
@@ -599,6 +600,184 @@ test("HTTP queries enforce current Unit scope and admin token errors preserve ro
   });
   assert.equal(cleanup.status, 200);
   assert.equal(cleanup.body.remainingMatchingRecordCounts.messages, 0);
+});
+
+test("Test-only query and cleanup leave Production and unrelated data intact", async (context) => {
+  const directory = mkdtempSync(join(tmpdir(), "brake-test-only-"));
+  const databasePath = join(directory, "data.db");
+  const socketPath = join(directory, "admin.sock");
+  const testContext = currentContext();
+  delete testContext.productionUnit;
+  const application = await startBackend({
+    adminSocketPath: socketPath, databasePath, migrationsDirectory,
+    currentUnitContext: testContext, now: () => NOW,
+  });
+  context.after(async () => {
+    await application.shutdown();
+    rmSync(directory, { recursive: true, force: true });
+  });
+  const page = await http(application.port, "GET", `/api/v1/brake/units/${TEST_UID}/windows`);
+  assert.equal(page.status, 200);
+  assert.equal(page.body.unitRole, "VALIDATION");
+  assert.deepEqual(page.body.items, []);
+  assert.equal((await http(application.port, "GET", `/api/v1/brake/units/${PRODUCTION_UID}/windows`)).body.errorCode, "UNIT_NOT_CURRENT");
+  for (const [unitSystemUid, unitRole] of [[TEST_UID, "VALIDATION"], [PRODUCTION_UID, "PRODUCTION"], ["unrelated-unit", "VALIDATION"]]) {
+    assert.equal((await http(application.port, "POST", "/api/v1/brake/messages", JSON.stringify(digest({
+      ...advisory(), unitSystemUid, unitRole,
+    })))).status, 201);
+  }
+  const database = new DatabaseSync(databasePath);
+  const store = new BrakeDataStore(database);
+  const nonmatchingBefore = store.recordSet([TEST_UID], false).sha256;
+  const selector = { schemaVersion: 1, contractVersion: "1.0.0", systemUids: [TEST_UID] };
+  for (const systemUids of [[], [TEST_UID, TEST_UID], [PRODUCTION_UID], ["*"], ["unrelated-unit"], [TEST_UID, PRODUCTION_UID]]) {
+    const invalid = await unix(socketPath, "/api/v1/brake/admin/current-run/cleanup-preview", { ...selector, systemUids });
+    assert.equal(invalid.status, 400);
+    assert.equal(invalid.body.errorCode, "INVALID_REQUEST");
+  }
+  assert.equal(store.recordSet([TEST_UID]).counts.messages, 1);
+  const preview = await unix(socketPath, "/api/v1/brake/admin/current-run/cleanup-preview", selector);
+  assert.equal(preview.status, 200);
+  assert.deepEqual(preview.body.systemUids, [TEST_UID]);
+  const result = await unix(socketPath, "/api/v1/brake/admin/current-run/cleanup", {
+    ...selector, confirmationToken: preview.body.confirmationToken,
+  });
+  assert.equal(result.status, 200);
+  assert.equal(result.body.remainingMatchingRecordCounts.messages, 0);
+  assert.equal(result.body.nonmatchingRecordSetSha256, nonmatchingBefore);
+  assert.equal(store.query("ADVISORY", PRODUCTION_UID, 50, null).items.length, 1);
+  assert.equal(store.query("ADVISORY", "unrelated-unit", 50, null).items.length, 1);
+  const emptyPreview = await unix(socketPath, "/api/v1/brake/admin/current-run/cleanup-preview", selector);
+  const empty = await unix(socketPath, "/api/v1/brake/admin/current-run/cleanup", {
+    ...selector, confirmationToken: emptyPreview.body.confirmationToken,
+  });
+  assert.equal(empty.status, 200);
+  assert.equal(empty.body.deletedRecordCounts.messages, 0);
+  database.close();
+});
+
+test("malformed or Production-only context cannot authorize queries or cleanup", async () => {
+  const valid = currentContext();
+  const variants = [
+    { ...valid, testUnit: undefined },
+    { ...valid, productionUnit: { ...valid.productionUnit, systemUid: TEST_UID } },
+    { ...valid, productionUnit: null },
+    { ...valid, productionUnit: undefined },
+    { ...valid, testUnit: { ...valid.testUnit, systemUid: 7 } },
+    { ...valid, testUnit: { ...valid.testUnit, unitRole: "PRODUCTION" } },
+    { ...valid, cloudOnline: true },
+  ];
+  for (const currentUnitContext of variants) {
+    const application = await startBackend({ migrationsDirectory, currentUnitContext, now: () => NOW });
+    try {
+      assert.equal(application.readiness().ready, true);
+      const query = await http(application.port, "GET", `/api/v1/brake/units/${TEST_UID}/windows`);
+      assert.equal(query.status, 503);
+      assert.equal(query.body.errorCode, "CURRENT_UNIT_CONTEXT_UNAVAILABLE");
+      const preview = await unix(application.adminSocketPath, "/api/v1/brake/admin/current-run/cleanup-preview", {
+        schemaVersion: 1, contractVersion: "1.0.0", systemUids: [TEST_UID],
+      });
+      assert.equal(preview.status, 503);
+    } finally {
+      await application.shutdown();
+    }
+  }
+});
+
+test("storage selectors reject invalid cardinality and duplicate or malformed UIDs before deletion", () => {
+  const database = new DatabaseSync(":memory:");
+  applyMigrations(database, loadMigrations(migrationsDirectory), NOW);
+  const store = new BrakeDataStore(database);
+  store.ingest(parse(advisory()), NOW);
+  for (const selector of [[], [TEST_UID, TEST_UID], [TEST_UID, PRODUCTION_UID, "third"], ["*"], [""]]) {
+    assert.throws(() => store.recordSet(selector), /one or two distinct exact Unit UIDs/);
+    assert.throws(() => store.deleteMatching(selector, "0".repeat(64)), /one or two distinct exact Unit UIDs/);
+  }
+  assert.equal(store.recordSet([TEST_UID]).counts.messages, 1);
+  database.close();
+});
+
+test("backend starts before provisioning and reads current-Test context without a restart", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "brake-context-lifecycle-"));
+  const databasePath = join(directory, "data.db");
+  const contextPath = join(directory, "current-unit-context.json");
+  const socketPath = join(directory, "admin.sock");
+  const options = backendOptionsFromArguments([
+    "--port", "0", "--database-path", databasePath, "--context-path", contextPath,
+    "--admin-socket-path", socketPath, "--migrations-directory", migrationsDirectory,
+  ]);
+  let application;
+  try {
+    application = await startBackend({ ...options, now: () => NOW });
+    assert.equal((await http(application.port, "GET", "/health/ready")).status, 200);
+    assert.deepEqual((await http(application.port, "GET", "/health/context")).body, {
+      ready: false, reason: "CURRENT_UNIT_CONTEXT_UNAVAILABLE", systemUids: [],
+    });
+    const testContext = currentContext();
+    delete testContext.productionUnit;
+    writeFileSync(contextPath, JSON.stringify(testContext));
+    assert.deepEqual((await http(application.port, "GET", "/health/context")).body, {
+      ready: true, reason: "READY", systemUids: [TEST_UID],
+    });
+    assert.equal((await http(application.port, "POST", "/api/v1/brake/messages", JSON.stringify(advisory()))).status, 201);
+    assert.equal((await http(application.port, "GET", `/api/v1/brake/units/${TEST_UID}/advisories`)).body.items.length, 1);
+    await application.shutdown();
+    application = await startBackend({ ...options, now: () => NOW });
+    assert.equal((await http(application.port, "GET", `/api/v1/brake/units/${TEST_UID}/advisories`)).body.items.length, 1);
+
+    // Retire retains the journal-derived Test binding until cleanup confirms zero.
+    const selector = { schemaVersion: 1, contractVersion: "1.0.0", systemUids: [TEST_UID] };
+    const preview = await unix(socketPath, "/api/v1/brake/admin/current-run/cleanup-preview", selector);
+    const cleanup = await unix(socketPath, "/api/v1/brake/admin/current-run/cleanup", {
+      ...selector, confirmationToken: preview.body.confirmationToken,
+    });
+    assert.equal(cleanup.body.remainingMatchingRecordCounts.messages, 0);
+    rmSync(contextPath);
+    assert.equal((await http(application.port, "GET", "/health/context")).status, 503);
+    assert.equal((await http(application.port, "GET", "/health/ready")).status, 200);
+    assert.equal((await http(application.port, "GET", `/api/v1/brake/units/${TEST_UID}/advisories`)).body.errorCode, "CURRENT_UNIT_CONTEXT_UNAVAILABLE");
+
+    writeFileSync(contextPath, JSON.stringify({ ...testContext, testUnit: { ...testContext.testUnit, systemUid: "new-test" } }));
+    assert.equal((await http(application.port, "GET", `/api/v1/brake/units/${TEST_UID}/advisories`)).body.errorCode, "UNIT_NOT_CURRENT");
+    assert.deepEqual((await http(application.port, "GET", "/api/v1/brake/units/new-test/advisories")).body.items, []);
+    for (const raw of ["{broken", '{"schemaVersion":1,"schemaVersion":1}', " ".repeat(4_097), "null", "[]"]) {
+      writeFileSync(contextPath, raw);
+      assert.equal((await http(application.port, "GET", "/health/context")).body.reason, "CURRENT_UNIT_CONTEXT_UNAVAILABLE");
+      assert.equal((await http(application.port, "GET", "/health/ready")).status, 200);
+    }
+  } finally {
+    await application?.shutdown();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("context changes close stale streams and provider failure never retains the previous scope", () => {
+  const database = new DatabaseSync(":memory:");
+  applyMigrations(database, loadMigrations(migrationsDirectory), NOW);
+  let context = currentContext();
+  delete context.productionUnit;
+  const dataHttp = new BrakeDataHttp(new BrakeDataStore(database), () => context, () => NOW);
+  let destroyed = 0;
+  dataHttp.subscribers.add({ systemUid: TEST_UID, response: { destroy() { destroyed++; } } });
+  assert.equal(dataHttp.queryReadiness().ready, true);
+  context = { ...context, testUnit: { ...context.testUnit, systemUid: "next-test" } };
+  assert.deepEqual(dataHttp.queryReadiness().systemUids, ["next-test"]);
+  assert.equal(destroyed, 1);
+  assert.equal(dataHttp.subscribers.size, 0);
+  context = undefined;
+  assert.equal(dataHttp.queryReadiness().reason, "CURRENT_UNIT_CONTEXT_UNAVAILABLE");
+  const failing = new BrakeDataHttp(new BrakeDataStore(database), () => { throw new Error("unreadable input"); });
+  assert.equal(failing.queryReadiness().ready, false);
+  database.close();
+});
+
+test("backend CLI accepts only explicit owned inputs and never changes listener exposure", () => {
+  assert.equal(backendOptionsFromArguments([]).host, "127.0.0.1");
+  assert.equal(backendOptionsFromArguments([]).port, 4300);
+  for (const args of [["--host", "0.0.0.0"], ["--port"], ["--port", ""], ["--port", "65536"],
+    ["--port", "1.5"], ["--port", "1", "--port", "2"], ["--context-path", "--port", "1"]]) {
+    assert.throws(() => backendOptionsFromArguments(args), TypeError);
+  }
 });
 
 test("a backend restart invalidates the process-local cleanup preview token", async () => {
