@@ -145,6 +145,9 @@ function isWritablePath(path) {
       "package-lock.json",
       "package.json",
       "tsconfig.json",
+      "Dockerfile",
+      ".dockerignore",
+      "container-build.json",
     ].includes(path) ||
     path.startsWith("LICENSES/") ||
     path.startsWith("apps/backend/") ||
@@ -165,7 +168,7 @@ function isGeneratedOrDeployment(path) {
     path.startsWith("node_modules/") ||
     path.startsWith("out/") ||
     path.startsWith("coverage/") ||
-    /(^|\/)(Dockerfile|compose\.ya?ml)$/.test(path) ||
+    (path !== "Dockerfile" && /(^|\/)(Dockerfile|compose\.ya?ml)$/.test(path)) ||
     [".class", ".dll", ".dylib", ".exe", ".o", ".so", ".wasm"].includes(extname(path))
   );
 }

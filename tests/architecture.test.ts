@@ -60,7 +60,7 @@ describe("architecture boundaries", () => {
     expect(violations).toEqual([]);
   });
 
-  it("has no deployment, credential, Presenter-source or generated tree", () => {
+  it("permits only the owned container recipe, not deployment, credentials or generated trees", () => {
     const paths = execFileSync(
       "git",
       ["ls-files", "--cached", "--others", "--exclude-standard"],
@@ -73,7 +73,7 @@ describe("architecture boundaries", () => {
         (path) =>
           path.startsWith("deploy/") ||
           path.startsWith("out/") ||
-          /(^|\/)(Dockerfile|compose\.ya?ml)$/.test(path) ||
+          (path !== "Dockerfile" && /(^|\/)(Dockerfile|compose\.ya?ml)$/.test(path)) ||
           /(^|\/)\.env(?:\.|$)/.test(path) ||
           /\.(?:crt|key|p12|pem|pfx)$/.test(path),
       ),
@@ -97,7 +97,8 @@ describe("architecture boundaries", () => {
     expect(backend).toContain('LOOPBACK_HOST = "127.0.0.1"');
     expect(dashboard.match(/host: "127\.0\.0\.1"/g)).toHaveLength(2);
     expect(development).toContain('LOOPBACK_HOST = "127.0.0.1"');
-    expect(`${backend}\n${dashboard}\n${development}`).not.toMatch(
+    expect(backend).toContain('options.runtimeMode === "container" ? CONTAINER_HOST : LOOPBACK_HOST');
+    expect(`${dashboard}\n${development}`).not.toMatch(
       /(?:0\.0\.0\.0|::0|host:\s*true)/,
     );
   });

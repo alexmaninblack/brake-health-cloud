@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 maninblack
+# SPDX-License-Identifier: Apache-2.0
+**
+!Dockerfile
+!package.json
+!package-lock.json
+!tsconfig.json
+!apps
+!apps/backend
+!apps/backend/**
+!apps/dashboard
+!apps/dashboard/package.json
+!packages
+!packages/*
+!packages/*/package.json
+!migrations
+!migrations/*.sql
+!LICENSE
+!NOTICE
+!THIRD_PARTY_NOTICES.md

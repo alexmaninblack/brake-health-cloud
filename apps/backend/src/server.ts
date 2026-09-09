@@ -12,7 +12,10 @@ import { BrakeDataStore } from "./brake-data-store.js";
 import { applyMigrations, loadMigrations, MigrationError, validateSchemaV2 } from "./migrations.js";
 
 export const LOOPBACK_HOST = "127.0.0.1";
+export const CONTAINER_HOST = "0.0.0.0";
+export type RuntimeMode = "native" | "container";
 export const ADMIN_SOCKET_PATH = "/run/brake-health-cloud/admin.sock";
+export const CONTAINER_ADMIN_SOCKET_PATH = "/tmp/demo-backend/admin.sock";
 
 export type ReadinessReason =
   | "READY" | "DATABASE_UNAVAILABLE" | "MIGRATION_FAILED" | "UNKNOWN_NEWER_SCHEMA";
@@ -20,6 +23,7 @@ export type ReadinessReason =
 export interface BackendOptions {
   readonly databasePath?: string;
   readonly host?: typeof LOOPBACK_HOST;
+  readonly runtimeMode?: RuntimeMode;
   readonly migrationsDirectory?: string;
   readonly currentUnitContext?: CurrentUnitContextInput;
   readonly adminSocketPath?: string;
@@ -31,7 +35,7 @@ export interface BackendOptions {
 export interface BackendApplication {
   readonly adminSocketPath: string | null;
   readonly databasePath: string;
-  readonly host: typeof LOOPBACK_HOST;
+  readonly host: typeof LOOPBACK_HOST | typeof CONTAINER_HOST;
   readonly port: number;
   readonly readiness: () => {
     readonly ready: boolean;
@@ -49,8 +53,11 @@ interface MutableReadiness {
 }
 
 export async function startBackend(options: BackendOptions = {}): Promise<BackendApplication> {
-  const host = options.host ?? LOOPBACK_HOST;
-  if (host !== LOOPBACK_HOST) throw new TypeError("backend host must be 127.0.0.1");
+  if (options.host !== undefined && options.host !== LOOPBACK_HOST) throw new TypeError("backend host must be 127.0.0.1");
+  if (options.runtimeMode !== undefined && options.runtimeMode !== "native" && options.runtimeMode !== "container") {
+    throw new TypeError("backend runtime mode is invalid");
+  }
+  const host = options.runtimeMode === "container" ? CONTAINER_HOST : LOOPBACK_HOST;
   const requestedPort = options.port ?? 0;
   if (!Number.isInteger(requestedPort) || requestedPort < 0 || requestedPort > 65_535) {
     throw new TypeError("backend port is invalid");

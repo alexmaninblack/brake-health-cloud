@@ -7,6 +7,12 @@ declare const process: {
   readonly argv: readonly string[];
   readonly execPath: string;
   readonly stdout: { write(value: string): void };
+  readonly stdin: {
+    on(event: "data", listener: (chunk: Uint8Array) => void): void;
+    on(event: "end", listener: () => void): void;
+    on(event: "error", listener: (error: Error) => void): void;
+    destroy(): void;
+  };
   readonly version: string;
   exit(code?: number): never;
   exitCode: number | undefined;
@@ -76,6 +82,7 @@ declare module "node:http" {
   }
 
   export interface IncomingMessage {
+    readonly statusCode?: number;
     readonly headers: Readonly<Record<string, string | readonly string[] | undefined>>;
     readonly method?: string;
     readonly url?: string;
@@ -96,6 +103,12 @@ declare module "node:http" {
   export function createServer(
     listener: (request: IncomingMessage, response: ServerResponse) => void,
   ): Server;
+  export function request(options: {socketPath: string; path: string; method: string; headers: Record<string, string>}, callback: (response: IncomingMessage) => void): {
+    on(event: "error", callback: (error: Error) => void): void;
+    setTimeout(milliseconds: number, callback: () => void): void;
+    destroy(error: Error): void;
+    end(body: string): void;
+  };
 }
 
 declare module "node:os" {
