@@ -17,6 +17,28 @@ by Demo Control; it deliberately does not ship the fixture Dashboard.
 
 ## Studio P1 lifecycle and Test scope
 
+### Native provenance migration — N3 consumer increment
+
+Ingestion accepts strict legacy product revision 1 / 1.0.0 and native revision
+2 / 2.0.0. Native records carry the package `serviceVersion` and closed
+`serviceInstance` (`serviceId`, `subjectId`, `instanceIndex`, `instanceId`).
+They reject service/model OCI digest fields; version is application-reported,
+not attestation, and does not select the compiled functional profile.
+Model configuration and VDP compatibility hashes remain unchanged.
+
+Forward-only migration 003 preserves every canonical message, legacy value
+and receipt. Native projection rows have a canonical native identity and no
+legacy artifact digest. Exact legacy source validation precedes table rebuild;
+failure rolls back the whole migration. Database readiness now reports schema
+3. Query collections emit revision 2 / 2.0.0, retaining original v1/v2 messages;
+legacy window summaries keep their digest, native summaries carry
+`messageSchemaVersion: 2` and `serviceInstance`. ACK/admin/error/SSE contracts
+are unchanged. No live backend database was migrated by source tests.
+
+The window-detail contract remains an unimplemented endpoint on this branch.
+Producer readers/serializers, Demo Control adapters and Test SOTA proof remain
+required before deployment. This increment is not complete service E2E.
+
 The existing backend entrypoint accepts these explicit Demo Control inputs:
 
 ```text
@@ -65,7 +87,7 @@ Process/storage readiness is deliberately independent from vehicle context:
 | Read | Success | Context not yet bound |
 | --- | --- | --- |
 | `GET /health/live` | `200 {"status":"LIVE"}` | Still live |
-| `GET /health/ready` | `200 {"ready":true,"reason":"READY","schemaVersion":2}` | Still storage-ready |
+| `GET /health/ready` | `200 {"ready":true,"reason":"READY","schemaVersion":3}` | Still storage-ready |
 | `GET /health/context` | `200 {"ready":true,"reason":"READY","systemUids":["current-test-system-uid"]}` | `503 {"ready":false,"reason":"CURRENT_UNIT_CONTEXT_UNAVAILABLE","systemUids":[]}` |
 
 Unavailable storage makes query-context readiness false with reason

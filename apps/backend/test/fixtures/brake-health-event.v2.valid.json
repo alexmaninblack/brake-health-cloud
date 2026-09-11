@@ -1,0 +1,32 @@
+{
+  "$comment": "SPDX-FileCopyrightText: 2026 maninblack; SPDX-License-Identifier: MIT",
+  "schemaVersion": 2,
+  "contractVersion": "2.0.0",
+  "messageType": "BRAKE_HEALTH_EVENT",
+  "eventId": "7f464ca1-c4a6-5438-90d0-2a9c9b9f9862",
+  "assessmentId": "d49ce480-a1ef-5cd2-9e05-fd3783bfd1de",
+  "sourceEventId": "4cba2d80-c04a-4d24-9f03-f4a85d56da13",
+  "unitSystemUid": "demo-unit-validation-001",
+  "unitRole": "VALIDATION",
+  "serviceVersion": "18.0.0",
+  "modelId": "brake-condition-demo-v1",
+  "modelVersion": "1.0.0",
+  "modelConfigSha256": "7749dff2dd340f05ae5f3c90912d65007ad48c52a5136ab0e165a83109d55f53",
+  "provenance": "DEMO_SYNTHETIC",
+  "content": {
+    "eventType": "BRAKE_CONDITION_BAND_CHANGED",
+    "reasonCode": "SYNTHETIC_ACCUMULATED_STRESS_THRESHOLD",
+    "previousBand": "MONITOR",
+    "currentBand": "INSPECTION_RECOMMENDED",
+    "conditionScore": 38,
+    "effectiveAt": "2026-08-22T12:00:07.900Z",
+    "quality": "VALID_DEMO_SYNTHETIC"
+  },
+  "contentSha256": "df168403b59741dc61edb630312a15a658f45bd45a427c32d41f0952fc976001",
+  "serviceInstance": {
+    "serviceId": "fixture-service",
+    "subjectId": "fixture-subject",
+    "instanceIndex": 0,
+    "instanceId": "fixture-instance-1"
+  }
+}

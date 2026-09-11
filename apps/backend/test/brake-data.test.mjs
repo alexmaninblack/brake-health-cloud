@@ -16,7 +16,7 @@ import {
 } from "../../../out/backend/brake-data-contract.js";
 import { BrakeDataStore } from "../../../out/backend/brake-data-store.js";
 import { BrakeDataHttp } from "../../../out/backend/brake-data-http.js";
-import { applyMigrations, loadMigrations, validateSchemaV2ReadOnly } from "../../../out/backend/migrations.js";
+import { applyMigrations, loadMigrations, validateDatabaseSchemaReadOnly } from "../../../out/backend/migrations.js";
 import { startBackend } from "../../../out/backend/server.js";
 import { backendOptionsFromArguments, adminOperation } from "../../../out/backend/main.js";
 
@@ -129,6 +129,8 @@ test("SQLITE_FULL rolls back the complete ingestion transaction", () => {
     const database = new DatabaseSync(path);
     database.exec("PRAGMA page_size = 512");
     applyMigrations(database, loadMigrations(migrationsDirectory), NOW);
+    // Migration releases free pages: compact only this temporary test DB.
+    database.exec("VACUUM");
     const pageCount = database.prepare("PRAGMA page_count").get().page_count;
     database.exec(`PRAGMA max_page_count = ${pageCount}`);
     const store = new BrakeDataStore(database);
@@ -775,7 +777,7 @@ test("private empty proof works before Provision, rejects selectors and never de
   const zero = { messages: 0, windows: 0, assessments: 0, events: 0, advisories: 0, quarantine: 0 };
   assert.equal((await http(application.port, "GET", "/health/context")).status, 503);
   assert.deepEqual(await proof(), {
-    status: 200, body: { ...body, state: "EMPTY", databaseSchemaVersion: 2, recordCounts: zero, observedAt: NOW },
+    status: 200, body: { ...body, state: "EMPTY", databaseSchemaVersion: 3, recordCounts: zero, observedAt: NOW },
   });
   assert.equal((await http(application.port, "POST", "/api/v1/brake/admin/storage/empty-proof", JSON.stringify(body))).status, 404);
   for (const invalid of [{}, { ...body, systemUids: [TEST_UID] }, { ...body, confirmationToken: null }, { ...body, schemaVersion: 2 }]) {
@@ -802,7 +804,7 @@ test("empty proof refuses unknown tables, altered schema, ledger and orphan reco
   const alterations = [
     "CREATE TABLE unrecognized_product_data (value TEXT)",
     "DROP INDEX idx_messages_unit_received",
-    "PRAGMA user_version = 3",
+    "PRAGMA user_version = 4",
     "DELETE FROM schema_version WHERE version = 2",
     "PRAGMA foreign_keys = OFF; INSERT INTO receipts VALUES (999, 'orphan', '2026-08-29T12:00:00Z')",
   ];
@@ -833,7 +835,7 @@ test("whole-store proof uses only reads on the source database and requires expe
   const database = new DatabaseSync(":memory:");
   const migrations = loadMigrations(migrationsDirectory);
   applyMigrations(database, migrations, NOW);
-  const store = new BrakeDataStore(database, () => validateSchemaV2ReadOnly(database, migrations));
+  const store = new BrakeDataStore(database, () => validateDatabaseSchemaReadOnly(database, migrations));
   database.exec("PRAGMA query_only = ON");
   const before = database.prepare("SELECT total_changes() AS count").get().count;
   assert.ok(Object.values(store.wholeStoreCounts()).every((count) => count === 0));

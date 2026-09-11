@@ -1,0 +1,51 @@
+{
+  "$comment": "SPDX-FileCopyrightText: 2026 maninblack; SPDX-License-Identifier: MIT",
+  "schemaVersion": 2,
+  "contractVersion": "2.0.0",
+  "messageType": "BRAKE_HEALTH_ASSESSMENT",
+  "assessmentId": "d49ce480-a1ef-5cd2-9e05-fd3783bfd1de",
+  "sourceEventId": "4cba2d80-c04a-4d24-9f03-f4a85d56da13",
+  "unitSystemUid": "demo-unit-validation-001",
+  "unitRole": "VALIDATION",
+  "serviceVersion": "18.0.0",
+  "vdpContractVersion": "2.0.0",
+  "vdpContractSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+  "modelId": "brake-condition-demo-v1",
+  "modelVersion": "1.0.0",
+  "modelConfigSha256": "7749dff2dd340f05ae5f3c90912d65007ad48c52a5136ab0e165a83109d55f53",
+  "provenance": "DEMO_SYNTHETIC",
+  "assessedAt": "2026-08-22T12:00:08.000Z",
+  "content": {
+    "sourceWindowStartTimestamp": "2026-08-22T12:00:00.000Z",
+    "sourceWindowEndTimestamp": "2026-08-22T12:00:07.900Z",
+    "activeSampleCount": 30,
+    "straightActiveSampleCount": 30,
+    "features": {
+      "peakDecelerationMps2": 6.4,
+      "peakDecelerationBps": 8000,
+      "activeDurationSeconds": 3,
+      "activeDurationBps": 6000,
+      "speedReductionKph": 32,
+      "speedReductionBps": 8000,
+      "meanBrakeEffortPercent": 75,
+      "meanBrakeEffortBps": 5000,
+      "wheelDispersionRatio": 0.09,
+      "wheelDispersionBps": 6000
+    },
+    "episodeLoadBps": 6750,
+    "wearIndexBefore": 54,
+    "wearIncrement": 8,
+    "wearIndexAfter": 62,
+    "conditionScore": 38,
+    "previousBand": "MONITOR",
+    "currentBand": "INSPECTION_RECOMMENDED",
+    "quality": "VALID_DEMO_SYNTHETIC"
+  },
+  "contentSha256": "b1b5858b114898519fa0f4fe600864727df3c9f28c8228b182661ab6f183b932",
+  "serviceInstance": {
+    "serviceId": "fixture-service",
+    "subjectId": "fixture-subject",
+    "instanceIndex": 0,
+    "instanceId": "fixture-instance-1"
+  }
+}

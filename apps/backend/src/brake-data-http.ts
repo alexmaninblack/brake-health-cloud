@@ -232,8 +232,8 @@ export class BrakeDataHttp {
       uid, resource, page.nextKey[0]!, page.nextKey.slice(1),
     ])).toString("base64url");
     sendJson(response, 200, {
-      schemaVersion: 1,
-      contractVersion: "1.0.0",
+      schemaVersion: 2,
+      contractVersion: "2.0.0",
       resourceType: resource,
       unitSystemUid: uid,
       unitRole: role,
@@ -275,7 +275,7 @@ export class BrakeDataHttp {
     }
     const counts = this.storage(() => this.store.wholeStoreCounts());
     sendJson(response, 200, {
-      schemaVersion: 1, contractVersion: "1.0.0", databaseSchemaVersion: 2,
+      schemaVersion: 1, contractVersion: "1.0.0", databaseSchemaVersion: 3,
       state: Object.values(counts).every((count) => count === 0) ? "EMPTY" : "NONEMPTY",
       recordCounts: counts, observedAt: this.now(),
     });

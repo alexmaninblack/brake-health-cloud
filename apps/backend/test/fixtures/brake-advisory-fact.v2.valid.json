@@ -1,0 +1,36 @@
+{
+  "$comment": "SPDX-FileCopyrightText: 2026 maninblack; SPDX-License-Identifier: MIT",
+  "schemaVersion": 2,
+  "contractVersion": "2.0.0",
+  "messageType": "BRAKE_ADVISORY_FACT",
+  "unitSystemUid": "demo-unit-validation-001",
+  "unitRole": "VALIDATION",
+  "serviceVersion": "18.0.0",
+  "vdpContractVersion": "3.0.0",
+  "vdpContractSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+  "requestId": "16223957-cdc3-57d4-af7d-74f78016ca0e",
+  "producerEpoch": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "sequence": 1,
+  "gatewayState": "APPLIED",
+  "recordedAt": "2026-08-22T12:00:00.700Z",
+  "content": {
+    "decisionId": "59e854e8-596b-568b-8a18-12c44fb3a88c",
+    "operation": "SET",
+    "recommendation": "INSPECTION_RECOMMENDED",
+    "reasonCode": "PREDICTED_BRAKE_DEGRADATION",
+    "issuedAt": "2026-08-22T12:00:00.600Z",
+    "expiresAt": "2026-08-22T12:00:30.600Z",
+    "gatewayReason": "NONE",
+    "gatewayObservedAt": "2026-08-22T12:00:00.650Z",
+    "activeRecommendation": "INSPECTION_RECOMMENDED",
+    "activeReasonCode": "PREDICTED_BRAKE_DEGRADATION",
+    "activeUntil": "2026-08-22T12:00:30.600Z"
+  },
+  "contentSha256": "56500a4db40505e7a1c03ba37830f03b9a406cb54db8e1a81790f907431e703a",
+  "serviceInstance": {
+    "serviceId": "fixture-service",
+    "subjectId": "fixture-subject",
+    "instanceIndex": 0,
+    "instanceId": "fixture-instance-1"
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "$comment": "SPDX-FileCopyrightText: 2026 maninblack; SPDX-License-Identifier: MIT",
+  "schemaVersion": 2,
+  "contractVersion": "2.0.0",
+  "messageType": "WINDOW_CHUNK",
+  "eventType": "HARD_BRAKING_EPISODE_V1",
+  "eventId": "4cba2d80-c04a-4d24-9f03-f4a85d56da13",
+  "unitSystemUid": "demo-unit-validation-001",
+  "unitRole": "VALIDATION",
+  "serviceVersion": "18.0.0",
+  "vdpContractVersion": "1.0.0",
+  "vdpContractSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+  "content": {
+    "chunkIndex": 0,
+    "firstSampleIndex": 0,
+    "sampleCount": 2,
+    "samples": [
+      {
+        "sampleIndex": 0,
+        "sourceTimestamp": "2026-08-22T12:00:00.000Z",
+        "phase": "PRE",
+        "quality": "VALID_COMPLETE_FRAME",
+        "maxSourceAgeMs": 20,
+        "speedKph": 42,
+        "longitudinalAccelerationMps2": 0.1,
+        "lateralAccelerationMps2": 0,
+        "verticalAccelerationMps2": 0,
+        "acceleratorPedalPercent": 0,
+        "brakePedalPercent": 60
+      },
+      {
+        "sampleIndex": 1,
+        "sourceTimestamp": "2026-08-22T12:00:00.200Z",
+        "phase": "ACTIVE",
+        "quality": "VALID_COMPLETE_FRAME",
+        "maxSourceAgeMs": 22,
+        "speedKph": 41,
+        "longitudinalAccelerationMps2": -3,
+        "lateralAccelerationMps2": 0,
+        "verticalAccelerationMps2": 0,
+        "acceleratorPedalPercent": 0,
+        "brakePedalPercent": 65
+      }
+    ]
+  },
+  "contentSha256": "aab0a76d56fa55c2407fa52e1e84805b739ef0b1d45afc86d9804f60ebb2ab5d",
+  "serviceInstance": {
+    "serviceId": "fixture-service",
+    "subjectId": "fixture-subject",
+    "instanceIndex": 0,
+    "instanceId": "fixture-instance-1"
+  }
+}

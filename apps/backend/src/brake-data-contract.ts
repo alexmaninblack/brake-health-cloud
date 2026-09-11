@@ -86,14 +86,21 @@ export function parseBrakeMessage(raw: string): ParsedBrakeMessage {
     ] as const,
     "messageType",
   );
-  const topKeys = keysFor(messageType);
+  const native = value.schemaVersion === 2;
+  const topKeys = native
+    ? [...keysFor(messageType).filter(key => key !== "serviceArtifactSha256" && key !== "modelArtifactSha256"), "serviceInstance"]
+    : keysFor(messageType);
   closed(value, topKeys, "message");
-  exact(value.schemaVersion, 1, "schemaVersion");
-  exact(value.contractVersion, "1.0.0", "contractVersion");
+  exact(value.schemaVersion, native ? 2 : 1, "schemaVersion");
+  exact(value.contractVersion, native ? "2.0.0" : "1.0.0", "contractVersion");
   const unitSystemUid = patterned(value.unitSystemUid, BOUNDED_ID, "unitSystemUid");
   const unitRole = enumValue(value.unitRole, ["VALIDATION", "PRODUCTION"] as const, "unitRole");
   const serviceVersion = patterned(value.serviceVersion, SEMVER, "serviceVersion");
-  patterned(value.serviceArtifactSha256, SHA256, "serviceArtifactSha256");
+  if (native) {
+    validateNativeProvenance(value);
+  } else {
+    patterned(value.serviceArtifactSha256, SHA256, "serviceArtifactSha256");
+  }
   const content = record(value.content, "content");
   const contentSha256 = patterned(value.contentSha256, SHA256, "contentSha256");
   const actualContentSha256 = sha256Hex(canonicalize(content));
@@ -123,6 +130,18 @@ export function parseBrakeMessage(raw: string): ParsedBrakeMessage {
     sourceTimeNormalized: normalizeRfc3339Instant(details.sourceTime),
     changedResource: details.resource,
   };
+}
+
+/** Application-reported native identity; never an authentication decision. */
+function validateNativeProvenance(value: Readonly<Record<string, JsonValue>>): void {
+  const id = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$(?![\s\S])/;
+  patterned(value.unitSystemUid, id, "unitSystemUid");
+  const version = patterned(value.serviceVersion, /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$(?![\s\S])/, "serviceVersion");
+  if (version.length > 32) invalid("serviceVersion exceeds its package bound");
+  const instance = record(value.serviceInstance, "serviceInstance");
+  closed(instance, ["serviceId", "subjectId", "instanceIndex", "instanceId"], "serviceInstance");
+  for (const key of ["serviceId", "subjectId", "instanceId"]) patterned(instance[key], id, key);
+  integer(instance.instanceIndex, 0, Number.MAX_SAFE_INTEGER, "instanceIndex");
 }
 
 interface SpecificDetails {
@@ -252,14 +271,14 @@ function validateAssessment(
   content: Readonly<Record<string, JsonValue>>,
   serviceVersion: string,
 ): SpecificDetails {
-  if (serviceVersion !== "2.0.0" && serviceVersion !== "3.0.0") {
+  if (value.schemaVersion === 1 && serviceVersion !== "2.0.0" && serviceVersion !== "3.0.0") {
     invalid("assessment serviceVersion must be 2.0.0 or 3.0.0");
   }
   const assessmentId = patterned(value.assessmentId, UUID5, "assessmentId");
   patterned(value.sourceEventId, UUID4, "sourceEventId");
   validateVdp(value);
   validateModel(value);
-  patterned(value.modelArtifactSha256, SHA256, "modelArtifactSha256");
+  if (value.schemaVersion === 1) patterned(value.modelArtifactSha256, SHA256, "modelArtifactSha256");
   const assessedAt = dateTime(value.assessedAt, "assessedAt");
   closed(content, [
     "sourceWindowStartTimestamp", "sourceWindowEndTimestamp", "activeSampleCount",
@@ -287,7 +306,7 @@ function validateEvent(
   content: Readonly<Record<string, JsonValue>>,
   serviceVersion: string,
 ): SpecificDetails {
-  if (serviceVersion !== "2.0.0" && serviceVersion !== "3.0.0") {
+  if (value.schemaVersion === 1 && serviceVersion !== "2.0.0" && serviceVersion !== "3.0.0") {
     invalid("event serviceVersion must be 2.0.0 or 3.0.0");
   }
   const eventId = patterned(value.eventId, UUID5, "eventId");
@@ -312,7 +331,7 @@ function validateAdvisory(
   content: Readonly<Record<string, JsonValue>>,
   serviceVersion: string,
 ): SpecificDetails {
-  exact(serviceVersion, "3.0.0", "advisory serviceVersion");
+  if (value.schemaVersion === 1) exact(serviceVersion, "3.0.0", "advisory serviceVersion");
   validateVdp(value);
   const requestId = patterned(value.requestId, UUID, "requestId");
   patterned(value.producerEpoch, UUID, "producerEpoch");

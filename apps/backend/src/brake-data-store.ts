@@ -357,25 +357,25 @@ export class BrakeDataStore {
       }
       case "BRAKE_HEALTH_ASSESSMENT":
         this.database.prepare(
-          "INSERT INTO assessments(message_id, unit_system_uid, assessment_id, source_event_id, assessed_at, content_sha256, " +
+          "INSERT INTO assessments(wire_schema_version, service_instance_json, message_id, unit_system_uid, assessment_id, source_event_id, assessed_at, content_sha256, " +
             "assessed_at_normalized, service_version, service_artifact_sha256, vdp_contract_version, vdp_contract_sha256, " +
-            "model_id, model_version, model_config_sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "model_id, model_version, model_config_sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         ).run(
-          messageId, message.unitSystemUid, text(value.assessmentId), text(value.sourceEventId), text(value.assessedAt),
+          integer(value.schemaVersion), nativeIdentity(value), messageId, message.unitSystemUid, text(value.assessmentId), text(value.sourceEventId), text(value.assessedAt),
           message.contentSha256, normalizeRfc3339Instant(text(value.assessedAt)), text(value.serviceVersion),
-          text(value.serviceArtifactSha256), text(value.vdpContractVersion),
+          legacyArtifact(value), text(value.vdpContractVersion),
           text(value.vdpContractSha256), text(value.modelId), text(value.modelVersion), text(value.modelConfigSha256),
         );
         return;
       case "BRAKE_HEALTH_EVENT":
         this.database.prepare(
-          "INSERT INTO condition_events(message_id, unit_system_uid, event_id, assessment_id, source_event_id, effective_at, " +
+          "INSERT INTO condition_events(wire_schema_version, service_instance_json, message_id, unit_system_uid, event_id, assessment_id, source_event_id, effective_at, " +
             "effective_at_normalized, content_sha256, service_version, service_artifact_sha256, model_id, model_version, " +
-            "model_config_sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "model_config_sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         ).run(
-          messageId, message.unitSystemUid, text(value.eventId), text(value.assessmentId), text(value.sourceEventId),
+          integer(value.schemaVersion), nativeIdentity(value), messageId, message.unitSystemUid, text(value.eventId), text(value.assessmentId), text(value.sourceEventId),
           text(content.effectiveAt), normalizeRfc3339Instant(text(content.effectiveAt)), message.contentSha256,
-          text(value.serviceVersion), text(value.serviceArtifactSha256),
+          text(value.serviceVersion), legacyArtifact(value),
           text(value.modelId), text(value.modelVersion), text(value.modelConfigSha256),
         );
         return;
@@ -394,11 +394,12 @@ export class BrakeDataStore {
     const value = message.value;
     return this.database.prepare(
       "SELECT 1 FROM condition_events WHERE unit_system_uid = ? AND assessment_id = ? AND source_event_id = ? " +
-        "AND service_version = ? AND service_artifact_sha256 = ? AND model_id = ? AND model_version = ? " +
-        "AND model_config_sha256 = ? LIMIT 1",
+        "AND service_version = ? AND service_artifact_sha256 IS ? AND model_id = ? AND model_version = ? " +
+        "AND model_config_sha256 = ? AND wire_schema_version = ? AND service_instance_json IS ? LIMIT 1",
     ).get(
       message.unitSystemUid, text(value.assessmentId), text(value.sourceEventId), text(value.serviceVersion),
-      text(value.serviceArtifactSha256), text(value.modelId), text(value.modelVersion), text(value.modelConfigSha256),
+      legacyArtifact(value), text(value.modelId), text(value.modelVersion), text(value.modelConfigSha256),
+      integer(value.schemaVersion), nativeIdentity(value),
     ) !== undefined;
   }
 
@@ -438,7 +439,7 @@ export class BrakeDataStore {
     ].map(objectJson);
     const metadata = canonicalRows.map((row) =>
       canonicalize([
-        row.unitRole!, row.serviceVersion!, row.serviceArtifactSha256!,
+        row.schemaVersion!, row.unitRole!, row.serviceVersion!, legacyArtifact(row), nativeIdentity(row),
         row.vdpContractVersion!, row.vdpContractSha256!,
       ]),
     );
@@ -478,11 +479,11 @@ export class BrakeDataStore {
   ): void {
     const value = message.value;
     this.database.prepare(
-      "INSERT INTO windows(unit_system_uid, event_id, unit_role, service_version, service_artifact_sha256, " +
+      "INSERT INTO windows(wire_schema_version, service_instance_json, unit_system_uid, event_id, unit_role, service_version, service_artifact_sha256, " +
         "vdp_contract_version, vdp_contract_sha256, delivery_state, projection_state, terminal_state, " +
         "received_chunk_count, expected_chunk_count, received_sample_count, phase_pre_count, phase_active_count, " +
         "phase_post_count, window_start_timestamp, window_start_timestamp_normalized, completion_content_sha256, " +
-        "window_sha256, last_backend_received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+        "window_sha256, last_backend_received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
         "ON CONFLICT(unit_system_uid, event_id) DO UPDATE SET " +
         "delivery_state=excluded.delivery_state, projection_state=excluded.projection_state, terminal_state=excluded.terminal_state, " +
         "received_chunk_count=excluded.received_chunk_count, expected_chunk_count=excluded.expected_chunk_count, " +
@@ -493,7 +494,7 @@ export class BrakeDataStore {
         "completion_content_sha256=excluded.completion_content_sha256, " +
         "window_sha256=excluded.window_sha256, last_backend_received_at=excluded.last_backend_received_at",
     ).run(
-      message.unitSystemUid, eventId, message.unitRole, text(value.serviceVersion), text(value.serviceArtifactSha256),
+      integer(value.schemaVersion), nativeIdentity(value), message.unitSystemUid, eventId, message.unitRole, text(value.serviceVersion), legacyArtifact(value),
       text(value.vdpContractVersion), text(value.vdpContractSha256), projection.deliveryState,
       projection.projectionState, projection.terminalState, projection.receivedChunkCount,
       projection.expectedChunkCount, projection.receivedSampleCount, projection.phaseSampleCounts.PRE,
@@ -551,7 +552,9 @@ export class BrakeDataStore {
         unitSystemUid: stringColumn(row, "unit_system_uid"),
         unitRole: stringColumn(row, "unit_role"),
         serviceVersion: stringColumn(row, "service_version"),
-        serviceArtifactSha256: stringColumn(row, "service_artifact_sha256"),
+        ...(numberColumn(row, "wire_schema_version") === 1
+          ? { serviceArtifactSha256: stringColumn(row, "service_artifact_sha256") }
+          : { messageSchemaVersion: 2, serviceInstance: objectJson(stringColumn(row, "service_instance_json")) }),
         vdpContractVersion: stringColumn(row, "vdp_contract_version"),
         vdpContractSha256: stringColumn(row, "vdp_contract_sha256"),
         windowStartTimestamp: stringColumn(row, "window_start_timestamp"),
@@ -627,11 +630,12 @@ export class BrakeDataStore {
         const assessment = this.database.prepare(
           "SELECT a.vdp_contract_version, a.vdp_contract_sha256 FROM assessments a " +
             "WHERE a.unit_system_uid = ? AND a.assessment_id = ? AND a.source_event_id = ? " +
-            "AND a.service_version = ? AND a.service_artifact_sha256 = ? AND a.model_id = ? " +
-            "AND a.model_version = ? AND a.model_config_sha256 = ?",
+            "AND a.service_version = ? AND a.service_artifact_sha256 IS ? AND a.model_id = ? " +
+            "AND a.model_version = ? AND a.model_config_sha256 = ? AND a.wire_schema_version = ? AND a.service_instance_json IS ?",
         ).get(
           row.unit_system_uid, row.assessment_id, row.source_event_id, row.service_version,
           row.service_artifact_sha256, row.model_id, row.model_version, row.model_config_sha256,
+          row.wire_schema_version, row.service_instance_json,
         ) as SqlRow | undefined;
         const message = objectJson(stringColumn(row, "canonical_message"));
         return {
@@ -802,4 +806,13 @@ function rollbackIfActive(database: DatabaseSync): void {
   } catch {
     // BEGIN itself may have failed because the single SQLite writer is busy.
   }
+}
+
+/** Legacy digest columns are absent for native records, never fabricated. */
+function legacyArtifact(value: Readonly<Record<string, JsonValue>>): string | null {
+  return value.schemaVersion === 1 ? text(value.serviceArtifactSha256) : null;
+}
+
+function nativeIdentity(value: Readonly<Record<string, JsonValue>>): string | null {
+  return value.schemaVersion === 2 ? canonicalize(value.serviceInstance!) : null;
 }

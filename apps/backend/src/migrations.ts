@@ -68,6 +68,9 @@ export function applyMigrations(
     }
     database.exec("BEGIN IMMEDIATE");
     try {
+      if (migration.version === 3 && migration.name === "native_service_provenance") {
+        validateLegacyProjectionSource(database, migrations.slice(0, 2));
+      }
       database.exec(migration.sql);
       const ledger = migrationLedger(database);
       database
@@ -129,38 +132,38 @@ export function readSchemaVersion(database: DatabaseSync): number {
   return row.user_version;
 }
 
-export function validateSchemaV2(
+export function validateDatabaseSchema(
   database: DatabaseSync,
   migrations: readonly Migration[],
 ): void {
-  validateSchemaV2Internal(database, migrations, true);
+  validateDatabaseSchemaInternal(database, migrations, true);
 }
 
 /** Recheck the packaged schema and integrity without writing to the source database. */
-export function validateSchemaV2ReadOnly(
+export function validateDatabaseSchemaReadOnly(
   database: DatabaseSync,
   migrations: readonly Migration[],
 ): void {
-  validateSchemaV2Internal(database, migrations, false);
+  validateDatabaseSchemaInternal(database, migrations, false);
 }
 
-function validateSchemaV2Internal(
+function validateDatabaseSchemaInternal(
   database: DatabaseSync,
   migrations: readonly Migration[],
   probeWrites: boolean,
 ): void {
   try {
-    if (migrations.length !== 2 || migrations[0]?.version !== 1 || migrations[0]?.name !== "initialize" ||
-        migrations[1]?.version !== 2 || migrations[1]?.name !== "brake_data" || readSchemaVersion(database) !== 2) {
-      throw new Error("application and database are not the exact v2 migration set");
+    if (migrations.length !== 3 || migrations[0]?.version !== 1 || migrations[0]?.name !== "initialize" ||
+        migrations[1]?.version !== 2 || migrations[1]?.name !== "brake_data" || migrations[2]?.version !== 3 || migrations[2]?.name !== "native_service_provenance" || readSchemaVersion(database) !== 3) {
+      throw new Error("application and database are not the exact v3 migration set");
     }
     const ledger = database
       .prepare("SELECT version, name, applied_at FROM schema_version ORDER BY version")
       .all() as Array<{ version: number; name: string; applied_at: string }>;
-    if (ledger.length !== 2 || ledger.some((row, index) =>
+    if (ledger.length !== 3 || ledger.some((row, index) =>
       row.version !== migrations[index]!.version || row.name !== migrations[index]!.name ||
       typeof row.applied_at !== "string" || row.applied_at.length === 0)) {
-      throw new Error("schema_version ledger does not exactly match v2");
+      throw new Error("schema_version ledger does not exactly match v3");
     }
     if (database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'").get() !== undefined) {
       throw new Error("legacy migration ledger remains after v2 transition");
@@ -170,7 +173,7 @@ function validateSchemaV2Internal(
     try {
       applyMigrations(reference, migrations, "1970-01-01T00:00:00.000Z");
       if (JSON.stringify(schemaManifest(database)) !== JSON.stringify(schemaManifest(reference))) {
-        throw new Error("database schema does not exactly match packaged v2");
+        throw new Error("database schema does not exactly match packaged v3");
       }
     } finally {
       reference.close();
@@ -183,8 +186,29 @@ function validateSchemaV2Internal(
     if (probeWrites) probeReadWriteTransaction(database, ledger[1]!.applied_at);
   } catch (error) {
     if (error instanceof MigrationError && error.code === "SCHEMA_VALIDATION_FAILED") throw error;
-    throw new MigrationError("SCHEMA_VALIDATION_FAILED", "database failed exact v2 readiness validation", { cause: error });
+    throw new MigrationError("SCHEMA_VALIDATION_FAILED", "database failed exact v3 readiness validation", { cause: error });
   }
+}
+
+/** Reject unknown legacy columns/objects before rebuilding any projection. */
+function validateLegacyProjectionSource(database: DatabaseSync, legacy: readonly Migration[]): void {
+  const reference = new DatabaseSync(":memory:");
+  try {
+    applyMigrations(reference, legacy, "1970-01-01T00:00:00.000Z");
+    if (readSchemaVersion(database) !== 2 ||
+        JSON.stringify(schemaManifest(database)) !== JSON.stringify(schemaManifest(reference))) {
+      throw new Error("legacy database does not exactly match the packaged migration source");
+    }
+    const ledger = database.prepare("SELECT version, name, applied_at FROM schema_version ORDER BY version").all() as Array<Record<string, unknown>>;
+    if (ledger.length !== legacy.length || ledger.some((row, index) =>
+      row.version !== legacy[index]!.version || row.name !== legacy[index]!.name ||
+      typeof row.applied_at !== "string" || row.applied_at.length === 0)) {
+      throw new Error("legacy migration ledger is not exact");
+    }
+    if (database.prepare("PRAGMA foreign_key_check").get() !== undefined) {
+      throw new Error("legacy database contains inconsistent relationships");
+    }
+  } finally {reference.close();}
 }
 
 function schemaManifest(database: DatabaseSync): readonly Record<string, unknown>[] {
