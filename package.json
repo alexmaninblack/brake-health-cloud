@@ -3,6 +3,7 @@
   "name": "brake-health-cloud",
   "version": "0.1.0",
   "private": true,
+  "aosedgeDemo": {"mockCleanupProtocol": "isolated-mock-v1"},
   "type": "module",
   "license": "Apache-2.0",
   "engines": {

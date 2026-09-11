@@ -81,6 +81,7 @@ export class BrakeDataHttp {
     private readonly now: () => string = () => new Date().toISOString(),
     private readonly hmacKey: Uint8Array = randomBytes(32),
     private readonly onStorageFailure: () => void = () => undefined,
+    private readonly demoMock = false,
   ) {
     this.refreshContext();
   }
@@ -101,6 +102,22 @@ export class BrakeDataHttp {
     }
     try {
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
+      if (this.demoMock) {
+        if (!url.pathname.startsWith("/api/v1/brake/demo-mock/")) throw new HttpRequestError("INVALID_REQUEST", "mock namespace required");
+        response.setHeader("x-aos-demo-source", "MOCK");
+        if (request.method === "GET" && url.pathname === "/api/v1/brake/demo-mock/summary") {
+          const readiness = this.queryReadiness();
+          if (!readiness.ready || readiness.systemUids.length !== 1) {
+            sendError(response, 503, "CURRENT_UNIT_CONTEXT_UNAVAILABLE", "current Test is unavailable", true); return;
+          }
+          response.statusCode = 200; response.setHeader("content-type", "application/json");
+          response.end(JSON.stringify(this.storage(() => this.store.mockSummary(readiness.systemUids[0]!)))); return;
+        }
+        if (request.method === "POST" && (request.headers["x-aos-demo-source"] !== "MOCK" || request.headers.origin !== undefined || request.headers["sec-fetch-mode"] !== undefined)) throw new HttpRequestError("INVALID_REQUEST", "explicit service mock marker required");
+        url.pathname = url.pathname.replace("/demo-mock/", "/");
+      } else if (request.headers["x-aos-demo-source"] !== undefined) {
+        throw new HttpRequestError("INVALID_REQUEST", "mock data cannot enter live ingestion");
+      }
       if (request.method === "POST" && url.pathname === "/api/v1/brake/messages") {
         if (!isJsonContentType(request.headers["content-type"])) {
           throw new HttpRequestError("INVALID_REQUEST", "content-type must be application/json");
@@ -139,7 +156,8 @@ export class BrakeDataHttp {
       const raw = await readBody(request, ADMIN_MAXIMUM, false);
       const value = object(parseJsonRejectDuplicates(raw));
       this.refreshContext();
-      const path = new URL(request.url ?? "/", "http://local").pathname;
+      const requestedPath = new URL(request.url ?? "/", "http://local").pathname;
+      const path = this.demoMock ? requestedPath.replace("/demo-mock/", "/") : requestedPath;
       if (path === "/api/v1/brake/admin/storage/empty-proof") {
         this.emptyProof(value, response);
         return;
@@ -185,6 +203,11 @@ export class BrakeDataHttp {
   private async ingest(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const raw = await readBody(request, PUBLIC_MAXIMUM, true);
     const message = parseBrakeMessage(raw);
+    if (this.demoMock) {
+      const role = this.authorize(message.unitSystemUid, response);
+      if (role === null) return;
+      if (role !== "VALIDATION" || message.unitRole !== "VALIDATION") throw new HttpRequestError("INVALID_REQUEST", "mock ingestion is Test-only");
+    }
     const result = this.storage(() => this.store.ingest(message, this.now()));
     if (result.httpStatus === 409) {
       this.notify(message.unitSystemUid, result.changedResources);

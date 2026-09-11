@@ -72,6 +72,8 @@ export async function startBackend(options: BackendOptions = {}): Promise<Backen
   const readiness: MutableReadiness = { ready: false, reason: "DATABASE_UNAVAILABLE", schemaVersion: null };
   let database: DatabaseSync | undefined;
   let dataHttp: BrakeDataHttp | undefined;
+  let mockDatabase: DatabaseSync | undefined;
+  let mockHttp: BrakeDataHttp | undefined;
   try {
     database = new DatabaseSync(databasePath);
     database.exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA busy_timeout = 5000;");
@@ -99,12 +101,33 @@ export async function startBackend(options: BackendOptions = {}): Promise<Backen
       : error instanceof MigrationError ? "MIGRATION_FAILED" : "DATABASE_UNAVAILABLE";
   }
 
+  // Mock transport uses the same validator/store in a separate owned database.
+  // Failure of this diagnostic surface never replaces normal product storage.
+  if (readiness.ready) {
+    try {
+      mockDatabase = new DatabaseSync(databasePath + ".demo-mock");
+      mockDatabase.exec("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;");
+      const migrations = loadMigrations(migrationsDirectory);
+      applyMigrations(mockDatabase, migrations, now()); validateDatabaseSchema(mockDatabase, migrations);
+      const db = mockDatabase;
+      const testContext = () => {
+        if (!dataHttp?.queryReadiness().ready) return undefined;
+        const context = typeof options.currentUnitContext === "function" ? options.currentUnitContext() : options.currentUnitContext;
+        if (!context?.testUnit) return undefined;
+        return {schemaVersion: context.schemaVersion, contractVersion: context.contractVersion, source: context.source, testUnit: context.testUnit};
+      };
+      mockHttp = new BrakeDataHttp(new BrakeDataStore(db, () => validateDatabaseSchemaReadOnly(db, migrations)), testContext, now, undefined, undefined, true);
+    } catch { mockDatabase?.close(); mockDatabase = undefined; }
+  }
   const queryReadiness = (): QueryReadiness => dataHttp?.queryReadiness() ?? {
     ready: false, reason: "TEMPORARILY_UNAVAILABLE", systemUids: [],
   };
   const publicServer = createServer((request, response) => {
     response.setHeader("cache-control", "no-store");
-    if (request.method === "GET" && request.url === "/health/live") {
+    if (request.url?.startsWith("/api/v1/brake/demo-mock/")) {
+      if (mockHttp) void mockHttp.handlePublic(request, response);
+      else json(response, 503, {source: "DEMO_MOCK", vehicleTelemetry: false, errorCode: "MOCK_STORAGE_UNAVAILABLE"});
+    } else if (request.method === "GET" && request.url === "/health/live") {
       json(response, 200, { status: "LIVE" });
     } else if (request.method === "GET" && request.url === "/health/ready") {
       json(response, readiness.ready ? 200 : 503, {
@@ -126,7 +149,12 @@ export async function startBackend(options: BackendOptions = {}): Promise<Backen
   let adminServer: Server | undefined;
   if (dataHttp !== undefined) {
     rmSync(adminSocketPath, { force: true });
-    adminServer = createServer((request, response) => void dataHttp!.handleAdmin(request, response));
+    adminServer = createServer((request, response) => {
+      if (request.url?.startsWith("/api/v1/brake/demo-mock/admin/")) {
+        if (mockHttp) void mockHttp.handleAdmin(request, response);
+        else json(response, 503, {errorCode: "MOCK_STORAGE_UNAVAILABLE"});
+      } else void dataHttp!.handleAdmin(request, response);
+    });
     try {
       await listenUnix(adminServer, adminSocketPath);
       chmodSync(adminSocketPath, 0o600);
@@ -155,9 +183,11 @@ export async function startBackend(options: BackendOptions = {}): Promise<Backen
       if (stopped) return;
       stopped = true;
       dataHttp?.closeStreams();
+      mockHttp?.closeStreams();
       await closeServer(publicServer);
       if (adminServer !== undefined) await closeServer(adminServer);
       database?.close();
+      mockDatabase?.close();
       if (options.adminSocketPath !== undefined) rmSync(options.adminSocketPath, { force: true });
       cleanup(ownedDirectory);
     },

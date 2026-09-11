@@ -82,6 +82,17 @@ const PHYSICAL_TABLES = {
 } as const;
 
 export class BrakeDataStore {
+  /** Used only by the separate DEMO_MOCK database, never a live query fallback. */
+  public mockSummary(uid: string): unknown {
+    return {
+      source: "DEMO_MOCK", vehicleTelemetry: false, unitSystemUid: uid,
+      counts: this.database.prepare("SELECT message_type AS kind, count(*) AS count FROM messages WHERE unit_system_uid=? GROUP BY message_type ORDER BY message_type").all(uid),
+      records: this.database.prepare("SELECT canonical_message, backend_received_at FROM messages WHERE unit_system_uid=? ORDER BY id DESC LIMIT 3").all(uid).map((row) => ({
+        message: JSON.parse(String((row as SqlRow).canonical_message)) as unknown, backendReceivedAt: (row as SqlRow).backend_received_at,
+      })),
+    };
+  }
+
   public constructor(
     private readonly database: DatabaseSync,
     private readonly validateReadOnlySchema?: () => void,
