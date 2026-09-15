@@ -201,7 +201,7 @@ function validateChunk(
     }
     enumValue(sample.phase, ["PRE", "ACTIVE", "POST"] as const, "phase");
     exact(sample.quality, "VALID_COMPLETE_FRAME", "quality");
-    integer(sample.maxSourceAgeMs, 0, 250, "maxSourceAgeMs");
+    integer(sample.maxSourceAgeMs, 0, 5000, "maxSourceAgeMs");
     finiteRange(sample.speedKph, 0, 1000, "speedKph");
     finiteRange(sample.longitudinalAccelerationMps2, -100, 100, "longitudinalAccelerationMps2");
     finiteRange(sample.lateralAccelerationMps2, -100, 100, "lateralAccelerationMps2");

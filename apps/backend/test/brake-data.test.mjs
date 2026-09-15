@@ -28,6 +28,19 @@ const SOURCE_EVENT = "4cba2d80-c04a-4d24-9f03-f4a85d56da13";
 const ASSESSMENT = "59e854e8-596b-568b-8a18-12c44fb3a88c";
 const NOW = "2026-08-29T12:00:01.000Z";
 
+test("demo source-age budget accepts 5 seconds but rejects stale or future age", () => {
+  for (const age of [251, 4999, 5000]) {
+    const message = chunk(0);
+    message.content.samples[0].maxSourceAgeMs = age;
+    assert.doesNotThrow(() => parse(digest(message)));
+  }
+  for (const age of [-1, 5001]) {
+    const message = chunk(0);
+    message.content.samples[0].maxSourceAgeMs = age;
+    assert.throws(() => parse(digest(message)), /maxSourceAgeMs/);
+  }
+});
+
 test("RFC8785 edge vectors and duplicate JSON keys are deterministic", () => {
   const unicode = parseJsonRejectDuplicates('{"€":"Euro Sign","\\r":"Carriage Return","דּ":"Hebrew Letter Dalet With Dagesh","1":"One","😀":"Emoji: Grinning Face","":"Control","ö":"Latin Small Letter O With Diaeresis"}');
   assert.equal(canonicalize(unicode), '{"\\r":"Carriage Return","1":"One","":"Control","ö":"Latin Small Letter O With Diaeresis","€":"Euro Sign","😀":"Emoji: Grinning Face","דּ":"Hebrew Letter Dalet With Dagesh"}');
