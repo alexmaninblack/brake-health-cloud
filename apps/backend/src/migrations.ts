@@ -153,14 +153,15 @@ function validateDatabaseSchemaInternal(
   probeWrites: boolean,
 ): void {
   try {
-    if (migrations.length !== 3 || migrations[0]?.version !== 1 || migrations[0]?.name !== "initialize" ||
-        migrations[1]?.version !== 2 || migrations[1]?.name !== "brake_data" || migrations[2]?.version !== 3 || migrations[2]?.name !== "native_service_provenance" || readSchemaVersion(database) !== 3) {
-      throw new Error("application and database are not the exact v3 migration set");
+    if (migrations.length !== 4 || migrations[0]?.version !== 1 || migrations[0]?.name !== "initialize" ||
+        migrations[1]?.version !== 2 || migrations[1]?.name !== "brake_data" || migrations[2]?.version !== 3 || migrations[2]?.name !== "native_service_provenance" ||
+        migrations[3]?.version !== 4 || migrations[3]?.name !== "demo_scenario_reset" || readSchemaVersion(database) !== 4) {
+      throw new Error("application and database are not the exact v4 migration set");
     }
     const ledger = database
       .prepare("SELECT version, name, applied_at FROM schema_version ORDER BY version")
       .all() as Array<{ version: number; name: string; applied_at: string }>;
-    if (ledger.length !== 3 || ledger.some((row, index) =>
+    if (ledger.length !== 4 || ledger.some((row, index) =>
       row.version !== migrations[index]!.version || row.name !== migrations[index]!.name ||
       typeof row.applied_at !== "string" || row.applied_at.length === 0)) {
       throw new Error("schema_version ledger does not exactly match v3");

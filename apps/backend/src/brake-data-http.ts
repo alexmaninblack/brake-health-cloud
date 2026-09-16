@@ -14,6 +14,7 @@ import {
   parseJsonRejectDuplicates,
 } from "./brake-data-contract.js";
 import { BrakeDataStore, type QueryResource, type RecordCounts } from "./brake-data-store.js";
+import { DemoResetStore } from "./demo-reset.js";
 
 export interface CurrentUnitContext {
   readonly schemaVersion: 1;
@@ -82,6 +83,7 @@ export class BrakeDataHttp {
     private readonly hmacKey: Uint8Array = randomBytes(32),
     private readonly onStorageFailure: () => void = () => undefined,
     private readonly demoMock = false,
+    private readonly resets?: DemoResetStore,
   ) {
     this.refreshContext();
   }
@@ -102,6 +104,21 @@ export class BrakeDataHttp {
     }
     try {
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
+      // Command creation remains on the separate owner-only Unix listener.
+      if (url.pathname.startsWith("/api/v1/brake/admin/")) {
+        sendError(response, 404, "NOT_FOUND", "private administrative route", false); return;
+      }
+      if (!this.demoMock && this.resets) {
+        if (request.method === "POST" && ["/api/v1/brake/demo-control/poll", "/api/v1/brake/demo-control/ack"].includes(url.pathname)) {
+          if (request.headers.origin !== undefined || request.headers["sec-fetch-mode"] !== undefined || request.headers["x-aos-demo-source"] !== undefined || !isJsonContentType(request.headers["content-type"])) {
+            sendError(response, 403, "INVALID_REQUEST", "service route only", false); return;
+          }
+          const value = parseJsonRejectDuplicates(await readBody(request, ADMIN_MAXIMUM, false));
+          sendJson(response, 200, url.pathname.endsWith("/poll") ? this.resets.poll(value) : this.resets.acknowledge(value)); return;
+        }
+        const match = /^\/api\/v1\/brake\/units\/([^/]+)\/demo-reset$/.exec(url.pathname);
+        if (request.method === "GET" && match) {sendJson(response, 200, this.resets.status(decodeURIComponent(match[1]!))); return;}
+      }
       if (this.demoMock) {
         if (!url.pathname.startsWith("/api/v1/brake/demo-mock/")) throw new HttpRequestError("INVALID_REQUEST", "mock namespace required");
         response.setHeader("x-aos-demo-source", "MOCK");
@@ -157,6 +174,10 @@ export class BrakeDataHttp {
       const value = object(parseJsonRejectDuplicates(raw));
       this.refreshContext();
       const requestedPath = new URL(request.url ?? "/", "http://local").pathname;
+      // handleAdmin is called only by server.ts's 0600 Unix-socket server.
+      if (!this.demoMock && this.resets && requestedPath === "/api/v1/brake/admin/demo-reset") {
+        sendJson(response, 200, this.resets.create(value)); return;
+      }
       const path = this.demoMock ? requestedPath.replace("/demo-mock/", "/") : requestedPath;
       if (path === "/api/v1/brake/admin/storage/empty-proof") {
         this.emptyProof(value, response);
@@ -298,7 +319,7 @@ export class BrakeDataHttp {
     }
     const counts = this.storage(() => this.store.wholeStoreCounts());
     sendJson(response, 200, {
-      schemaVersion: 1, contractVersion: "1.0.0", databaseSchemaVersion: 3,
+      schemaVersion: 1, contractVersion: "1.0.0", databaseSchemaVersion: 4,
       state: Object.values(counts).every((count) => count === 0) ? "EMPTY" : "NONEMPTY",
       recordCounts: counts, observedAt: this.now(),
     });
@@ -467,6 +488,10 @@ export class BrakeDataHttp {
   }
 
   private handleFailure(response: ServerResponse, error: unknown): void {
+    if (error instanceof Error && (error.message.startsWith("RESET_") || error.message === "UNIT_NOT_CURRENT" || error.message === "CURRENT_UNIT_CONTEXT_UNAVAILABLE")) {
+      sendJson(response, error.message === "RESET_INVALID_REQUEST" ? 400 : 409,
+        {schemaVersion:1, errorCode:error.message, retryable:false}); return;
+    }
     if (error instanceof HttpRequestError) {
       sendError(response, 400, error.code, error.message, false);
       return;

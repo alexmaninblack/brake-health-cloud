@@ -57,7 +57,7 @@ export function backendOptionsFromArguments(args: readonly string[]): BackendOpt
 export async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args[0] === "--admin-operation") {
-    if (args.length !== 2 || !["preview", "execute", "empty-proof", "mock-preview", "mock-execute", "mock-empty-proof"].includes(args[1]!)) {
+    if (args.length !== 2 || !["preview", "execute", "empty-proof", "mock-preview", "mock-execute", "mock-empty-proof", "demo-reset"].includes(args[1]!)) {
       throw new TypeError("admin operation must be preview, execute or empty-proof");
     }
     const input = await readAdminInput();
@@ -81,10 +81,10 @@ export async function main(): Promise<void> {
 export function adminOperation(operation: string, body: string, socketPath = CONTAINER_ADMIN_SOCKET_PATH): Promise<{status: number; body: unknown}> {
   const mocked = operation.startsWith("mock-");
   if (mocked) operation = operation.slice(5);
-  if (operation !== "preview" && operation !== "execute" && operation !== "empty-proof") throw new TypeError("admin operation is invalid");
+  if (!["preview", "execute", "empty-proof", "demo-reset"].includes(operation) || (mocked && operation === "demo-reset")) throw new TypeError("admin operation is invalid");
   if (Buffer.byteLength(body, "utf8") > 4096) throw new TypeError("admin input is too large");
   parseJsonRejectDuplicates(body);
-  let path = operation === "empty-proof" ? "/api/v1/brake/admin/storage/empty-proof" :
+  let path = operation === "demo-reset" ? "/api/v1/brake/admin/demo-reset" : operation === "empty-proof" ? "/api/v1/brake/admin/storage/empty-proof" :
     operation === "preview" ? "/api/v1/brake/admin/current-run/cleanup-preview" : "/api/v1/brake/admin/current-run/cleanup";
   if (mocked) path = path.replace("/brake/admin/", "/brake/demo-mock/admin/");
   return new Promise((resolveResult, reject) => {

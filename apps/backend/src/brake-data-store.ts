@@ -56,6 +56,8 @@ export interface RecordCounts {
   readonly events: number;
   readonly advisories: number;
   readonly quarantine: number;
+  readonly resetProducers: number;
+  readonly resetCommands: number;
 }
 
 export interface RecordSetSummary {
@@ -75,10 +77,11 @@ interface SqlRow {
   readonly [key: string]: unknown;
 }
 
-const TABLES = ["messages", "windows", "assessments", "events", "advisories", "quarantine"] as const;
+const TABLES = ["messages", "windows", "assessments", "events", "advisories", "quarantine", "resetProducers", "resetCommands"] as const;
 const PHYSICAL_TABLES = {
   messages: "messages", windows: "windows", assessments: "assessments",
   events: "condition_events", advisories: "advisory_facts", quarantine: "quarantine",
+  resetProducers: "demo_reset_producers", resetCommands: "demo_reset_commands",
 } as const;
 
 export class BrakeDataStore {
@@ -271,6 +274,9 @@ export class BrakeDataStore {
       ["advisories", advisories],
       ["quarantine", quarantine],
     ];
+    const resetProducers = this.rows(`SELECT * FROM demo_reset_producers WHERE system_uid ${predicate}`, parameters, ["system_uid", "binding", "last_seen"]);
+    const resetCommands = this.rows(`SELECT * FROM demo_reset_commands WHERE system_uid ${predicate}`, parameters, ["command_id", "system_uid", "binding", "issued_at", "expires_at", "state", "result"]);
+    blocks.push(["resetProducers", resetProducers], ["resetCommands", resetCommands]);
     return {
       counts: {
         messages: messages.length,
@@ -279,6 +285,8 @@ export class BrakeDataStore {
         events: events.length,
         advisories: advisories.length,
         quarantine: quarantine.length,
+        resetProducers: resetProducers.length,
+        resetCommands: resetCommands.length,
       },
       sha256: sha256Hex(canonicalize(blocks)),
     };
@@ -307,6 +315,8 @@ export class BrakeDataStore {
       this.database.prepare(`DELETE FROM windows WHERE unit_system_uid IN (${placeholders})`).run(...systemUids);
       this.database.prepare(`DELETE FROM quarantine WHERE unit_system_uid IN (${placeholders})`).run(...systemUids);
       this.database.prepare(`DELETE FROM messages WHERE unit_system_uid IN (${placeholders})`).run(...systemUids);
+      this.database.prepare(`DELETE FROM demo_reset_commands WHERE system_uid IN (${placeholders})`).run(...systemUids);
+      this.database.prepare(`DELETE FROM demo_reset_producers WHERE system_uid IN (${placeholders})`).run(...systemUids);
       const remaining = this.recordSet(systemUids).counts;
       const nonmatchingAfter = this.recordSet(systemUids, false);
       if (!allZero(remaining) || nonmatchingAfter.sha256 !== nonmatchingBefore) {
@@ -804,7 +814,7 @@ function sqlValue(value: unknown): JsonValue {
 }
 
 function zeroCounts(): RecordCounts {
-  return { messages: 0, windows: 0, assessments: 0, events: 0, advisories: 0, quarantine: 0 };
+  return { messages: 0, windows: 0, assessments: 0, events: 0, advisories: 0, quarantine: 0, resetProducers: 0, resetCommands: 0 };
 }
 
 function allZero(counts: RecordCounts): boolean {

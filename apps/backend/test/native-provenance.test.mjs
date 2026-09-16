@@ -147,7 +147,7 @@ test("forward migration preserves all legacy rows and receipts, and failure roll
     assert.equal(oldDb.prepare("PRAGMA user_version").get().user_version, 2);
     const checkOriginal = () => {for (const {table, columns, rows} of snapshots) assert.deepEqual(oldDb.prepare(`SELECT ${columns.join(",")} FROM ${table}`).all(), rows);};
     checkOriginal();
-    assert.equal(applyMigrations(oldDb, migrations, now), 3);
+    assert.equal(applyMigrations(oldDb, migrations, now), 4);
     validateDatabaseSchema(oldDb, migrations); checkOriginal();
     assert.deepEqual(oldDb.prepare("PRAGMA foreign_key_check").all(), []);
     const migrated = new BrakeDataStore(oldDb);

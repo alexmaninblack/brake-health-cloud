@@ -32,21 +32,22 @@ test("fresh and repeat migration application is deterministic", () => {
   try {
     const migrations = loadMigrations(migrationsDirectory);
     const first = new DatabaseSync(databasePath);
-    assert.equal(applyMigrations(first, migrations, deterministicNow()), 3);
+    assert.equal(applyMigrations(first, migrations, deterministicNow()), 4);
     first.close();
 
     const reopened = new DatabaseSync(databasePath);
-    assert.equal(applyMigrations(reopened, migrations, deterministicNow()), 3);
+    assert.equal(applyMigrations(reopened, migrations, deterministicNow()), 4);
     const row = reopened
       .prepare("SELECT COUNT(*) AS count FROM schema_version")
       .get();
-    assert.equal(row.count, 3);
+    assert.equal(row.count, 4);
     assert.deepEqual(
       reopened.prepare("SELECT version, name, applied_at FROM schema_version ORDER BY version").all().map((value) => ({ ...value })),
       [
         { version: 1, name: "initialize", applied_at: deterministicNow() },
         { version: 2, name: "brake_data", applied_at: deterministicNow() },
         { version: 3, name: "native_service_provenance", applied_at: deterministicNow() },
+        { version: 4, name: "demo_scenario_reset", applied_at: deterministicNow() },
       ],
     );
     assert.equal(reopened.prepare("SELECT name FROM sqlite_master WHERE name = 'schema_migrations'").get(), undefined);
@@ -144,7 +145,7 @@ test("health endpoints are closed, ready and loopback-only", async (context) => 
   assert.deepEqual(application.readiness(), {
     ready: true,
     reason: "READY",
-    schemaVersion: 3,
+    schemaVersion: 4,
   });
   assert.deepEqual(await getJson(application.port, "/health/live"), {
     body: { status: "LIVE" },
@@ -152,7 +153,7 @@ test("health endpoints are closed, ready and loopback-only", async (context) => 
     status: 200,
   });
   assert.deepEqual(await getJson(application.port, "/health/ready"), {
-    body: { ready: true, reason: "READY", schemaVersion: 3 },
+    body: { ready: true, reason: "READY", schemaVersion: 4 },
     contentType: "application/json; charset=utf-8",
     status: 200,
   });
@@ -181,7 +182,7 @@ test("an unknown newer schema blocks readiness but not liveness", async (context
   const directory = mkdtempSync(join(tmpdir(), "brake-cloud-newer-"));
   const databasePath = join(directory, "newer.db");
   const database = new DatabaseSync(databasePath);
-  database.exec("PRAGMA user_version = 4");
+  database.exec("PRAGMA user_version = 5");
   database.close();
   const application = await startBackend({
     databasePath,
@@ -236,12 +237,12 @@ test("an unrecoverable runtime storage error fails readiness and all later data 
     assert.deepEqual(application.readiness(), {
       ready: false,
       reason: "DATABASE_UNAVAILABLE",
-      schemaVersion: 3,
+      schemaVersion: 4,
     });
     assert.deepEqual((await getJson(application.port, "/health/ready")).body, {
       ready: false,
       reason: "DATABASE_UNAVAILABLE",
-      schemaVersion: 3,
+      schemaVersion: 4,
     });
     assert.equal((await getJson(application.port, "/api/v1/brake/units/test-system/windows")).status, 503);
   } finally {

@@ -9,6 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import { BrakeDataHttp, type CurrentUnitContextInput, type QueryReadiness } from "./brake-data-http.js";
 import { BrakeDataStore } from "./brake-data-store.js";
+import { DemoResetStore } from "./demo-reset.js";
 import { applyMigrations, loadMigrations, MigrationError, validateDatabaseSchema, validateDatabaseSchemaReadOnly } from "./migrations.js";
 
 export const LOOPBACK_HOST = "127.0.0.1";
@@ -89,6 +90,12 @@ export async function startBackend(options: BackendOptions = {}): Promise<Backen
         readiness.schemaVersion = schemaVersion;
         dataHttp?.closeStreams();
       },
+      false,
+      new DemoResetStore(database, () => {
+        if (!dataHttp?.queryReadiness().ready) return undefined;
+        const context = typeof options.currentUnitContext === "function" ? options.currentUnitContext() : options.currentUnitContext;
+        return context?.testUnit.systemUid;
+      }, () => Date.parse(now())),
     );
     readiness.ready = true;
     readiness.reason = "READY";
