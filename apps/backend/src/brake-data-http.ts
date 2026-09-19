@@ -146,7 +146,31 @@ export class BrakeDataHttp {
         this.stream(url, response);
         return;
       }
+      const detail = /^\/api\/v1\/brake\/units\/([^/]+)\/windows\/([^/]+)$/.exec(url.pathname);
+      if (request.method === "GET" && detail && !this.demoMock) {
+        let uid, eventId;
+        try {uid = decodeURIComponent(detail[1]!); eventId = decodeURIComponent(detail[2]!);}
+        catch {throw new HttpRequestError("INVALID_REQUEST", "invalid window identity");}
+        const role = this.authorize(uid, response);
+        if (role === null) return;
+        if (url.search || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\s\S])/.test(eventId))
+          throw new HttpRequestError("INVALID_REQUEST", "invalid window detail query");
+        const result = this.storage(() => this.store.windowDetail(uid, eventId));
+        if (!result) {sendError(response, 404, "NOT_FOUND", "window was not found", false); return;}
+        sendJson(response, 200, {schemaVersion: 2, contractVersion: "2.0.0", resourceType: "WINDOW_DETAIL",
+          unitSystemUid: uid, unitRole: role, ...result}); return;
+      }
       const match = /^\/api\/v1\/brake\/units\/([^/]+)\/(windows|assessments|events|advisories)$/.exec(url.pathname);
+      const observation = /^\/api\/v1\/brake\/units\/([^/]+)\/function-observations$/.exec(url.pathname);
+      if (request.method === "GET" && observation && !this.demoMock) {
+        const uid = decodeURIComponent(observation[1]!);
+        if (this.authorize(uid, response) === null) return;
+        if ([...url.searchParams.keys()].some(key => key !== "limit") || url.searchParams.getAll("limit").length > 1)
+          throw new HttpRequestError("INVALID_REQUEST", "invalid observation query");
+        const limit = Number(url.searchParams.get("limit") ?? 10);
+        if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new HttpRequestError("INVALID_REQUEST", "invalid limit");
+        sendJson(response, 200, this.storage(() => this.store.functionObservations.query(uid, limit))); return;
+      }
       if (request.method === "GET" && match !== null) {
         this.query(decodeURIComponent(match[1]!), match[2]!, url, response);
         return;
@@ -223,6 +247,23 @@ export class BrakeDataHttp {
 
   private async ingest(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const raw = await readBody(request, PUBLIC_MAXIMUM, true);
+    let candidate: JsonValue;
+    try { candidate = parseJsonRejectDuplicates(raw); }
+    catch { throw new ContractError("UNPROCESSABLE_MESSAGE", "message is not valid JSON"); }
+    if (candidate && typeof candidate === "object" && !Array.isArray(candidate) && candidate.messageType === "BRAKE_FUNCTION_OBSERVATION") {
+      if (this.demoMock || request.headers.origin !== undefined || request.headers["sec-fetch-mode"] !== undefined)
+        throw new HttpRequestError("INVALID_REQUEST", "service observation route only");
+      if (typeof candidate.unitSystemUid !== "string") throw new HttpRequestError("INVALID_REQUEST", "Unit required");
+      const role = this.authorize(candidate.unitSystemUid, response); if (role === null) return;
+      try {
+        const result = this.store.functionObservations.ingest(candidate, role);
+        sendJson(response, result.status, result.body); return;
+      } catch (error) {
+        if (error instanceof Error && ["INVALID_FUNCTION_OBSERVATION", "FUNCTION_OBSERVATION_TOO_LARGE"].includes(error.message))
+          throw new ContractError(error.message === "FUNCTION_OBSERVATION_TOO_LARGE" ? "PAYLOAD_TOO_LARGE" : "UNPROCESSABLE_MESSAGE", "invalid function observation");
+        throw new StorageError({cause:error});
+      }
+    }
     const message = parseBrakeMessage(raw);
     if (this.demoMock) {
       const role = this.authorize(message.unitSystemUid, response);
@@ -319,7 +360,7 @@ export class BrakeDataHttp {
     }
     const counts = this.storage(() => this.store.wholeStoreCounts());
     sendJson(response, 200, {
-      schemaVersion: 1, contractVersion: "1.0.0", databaseSchemaVersion: 4,
+      schemaVersion: 1, contractVersion: "1.0.0", databaseSchemaVersion: 5,
       state: Object.values(counts).every((count) => count === 0) ? "EMPTY" : "NONEMPTY",
       recordCounts: counts, observedAt: this.now(),
     });

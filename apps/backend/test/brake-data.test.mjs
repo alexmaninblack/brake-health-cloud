@@ -454,10 +454,10 @@ test("durable store withholds pre-start chunks, reaches terminal, correlates pro
   const selector = [PRODUCTION_UID, TEST_UID].sort();
   const complementBefore = store.recordSet(selector, false).sha256;
   const preview = store.recordSet(selector);
-  assert.deepEqual(preview.counts, { messages: 6, windows: 1, assessments: 1, events: 1, advisories: 1, quarantine: 0, resetProducers: 0, resetCommands: 0 });
+  assert.deepEqual(preview.counts, { messages: 6, windows: 1, assessments: 1, events: 1, advisories: 1, quarantine: 0, resetProducers: 0, resetCommands: 0, functionObservations: 0, functionObservationConflicts: 0 });
   const result = store.deleteMatching(selector, preview.sha256);
   assert.equal(result.stale, false);
-  assert.deepEqual(result.remaining, { messages: 0, windows: 0, assessments: 0, events: 0, advisories: 0, quarantine: 0, resetProducers: 0, resetCommands: 0 });
+  assert.deepEqual(result.remaining, { messages: 0, windows: 0, assessments: 0, events: 0, advisories: 0, quarantine: 0, resetProducers: 0, resetCommands: 0, functionObservations: 0, functionObservationConflicts: 0 });
   assert.equal(result.nonmatchingSha256, complementBefore);
   assert.equal(store.query("ADVISORY", "historic-system", 50, null).items.length, 1);
   database.close();
@@ -759,7 +759,7 @@ test("single-Test cleanup explicitly reports a completely empty logical store", 
   });
   assert.equal((await http(application.port, "POST", "/api/v1/brake/messages", JSON.stringify(advisory()))).status, 201);
   const selector = { schemaVersion: 1, contractVersion: "1.0.0", systemUids: [TEST_UID] };
-  const zero = { messages: 0, windows: 0, assessments: 0, events: 0, advisories: 0, quarantine: 0, resetProducers: 0, resetCommands: 0 };
+  const zero = { messages: 0, windows: 0, assessments: 0, events: 0, advisories: 0, quarantine: 0, resetProducers: 0, resetCommands: 0, functionObservations: 0, functionObservationConflicts: 0 };
   for (const cycle of [1, 2]) {
     const preview = await unix(socketPath, "/api/v1/brake/admin/current-run/cleanup-preview", selector);
     assert.equal(preview.status, 200);
@@ -789,10 +789,10 @@ test("private empty proof works before Provision, rejects selectors and never de
   });
   const body = { schemaVersion: 1, contractVersion: "1.0.0" };
   const proof = async () => JSON.parse(JSON.stringify(await adminOperation("empty-proof", JSON.stringify(body), application.adminSocketPath)));
-  const zero = { messages: 0, windows: 0, assessments: 0, events: 0, advisories: 0, quarantine: 0, resetProducers: 0, resetCommands: 0 };
+  const zero = { messages: 0, windows: 0, assessments: 0, events: 0, advisories: 0, quarantine: 0, resetProducers: 0, resetCommands: 0, functionObservations: 0, functionObservationConflicts: 0 };
   assert.equal((await http(application.port, "GET", "/health/context")).status, 503);
   assert.deepEqual(await proof(), {
-    status: 200, body: { ...body, state: "EMPTY", databaseSchemaVersion: 4, recordCounts: zero, observedAt: NOW },
+    status: 200, body: { ...body, state: "EMPTY", databaseSchemaVersion: 5, recordCounts: zero, observedAt: NOW },
   });
   assert.equal((await http(application.port, "POST", "/api/v1/brake/admin/storage/empty-proof", JSON.stringify(body))).status, 404);
   for (const invalid of [{}, { ...body, systemUids: [TEST_UID] }, { ...body, confirmationToken: null }, { ...body, schemaVersion: 2 }]) {
@@ -821,7 +821,7 @@ test("empty proof refuses unknown tables, altered schema, ledger and orphan reco
   const alterations = [
     "CREATE TABLE unrecognized_product_data (value TEXT)",
     "DROP INDEX idx_messages_unit_received",
-    "PRAGMA user_version = 5",
+    "PRAGMA user_version = 6",
     "DELETE FROM schema_version WHERE version = 2",
     "PRAGMA foreign_keys = OFF; INSERT INTO receipts VALUES (999, 'orphan', '2026-08-29T12:00:00Z')",
   ];

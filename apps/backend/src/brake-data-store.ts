@@ -3,6 +3,7 @@
 
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
+import { FunctionObservationStore } from "./function-observation.js";
 
 import {
   canonicalize,
@@ -10,6 +11,7 @@ import {
   type JsonValue,
   normalizeRfc3339Instant,
   parseJsonRejectDuplicates,
+  parseBrakeMessage,
   type ParsedBrakeMessage,
   sha256Hex,
 } from "./brake-data-contract.js";
@@ -58,6 +60,8 @@ export interface RecordCounts {
   readonly quarantine: number;
   readonly resetProducers: number;
   readonly resetCommands: number;
+  readonly functionObservations: number;
+  readonly functionObservationConflicts: number;
 }
 
 export interface RecordSetSummary {
@@ -77,14 +81,16 @@ interface SqlRow {
   readonly [key: string]: unknown;
 }
 
-const TABLES = ["messages", "windows", "assessments", "events", "advisories", "quarantine", "resetProducers", "resetCommands"] as const;
+const TABLES = ["messages", "windows", "assessments", "events", "advisories", "quarantine", "resetProducers", "resetCommands", "functionObservations", "functionObservationConflicts"] as const;
 const PHYSICAL_TABLES = {
   messages: "messages", windows: "windows", assessments: "assessments",
   events: "condition_events", advisories: "advisory_facts", quarantine: "quarantine",
   resetProducers: "demo_reset_producers", resetCommands: "demo_reset_commands",
+  functionObservations: "function_observations", functionObservationConflicts: "function_observation_conflicts",
 } as const;
 
 export class BrakeDataStore {
+  public readonly functionObservations: FunctionObservationStore;
   /** Used only by the separate DEMO_MOCK database, never a live query fallback. */
   public mockSummary(uid: string): unknown {
     return {
@@ -99,7 +105,7 @@ export class BrakeDataStore {
   public constructor(
     private readonly database: DatabaseSync,
     private readonly validateReadOnlySchema?: () => void,
-  ) {}
+  ) { this.functionObservations = new FunctionObservationStore(database, "brake"); }
 
   /** Whole-store counts, without selectors, rows, changes or inferred identity. */
   public wholeStoreCounts(): RecordCounts {
@@ -277,6 +283,11 @@ export class BrakeDataStore {
     const resetProducers = this.rows(`SELECT * FROM demo_reset_producers WHERE system_uid ${predicate}`, parameters, ["system_uid", "binding", "last_seen"]);
     const resetCommands = this.rows(`SELECT * FROM demo_reset_commands WHERE system_uid ${predicate}`, parameters, ["command_id", "system_uid", "binding", "issued_at", "expires_at", "state", "result"]);
     blocks.push(["resetProducers", resetProducers], ["resetCommands", resetCommands]);
+    const functionObservations = this.rows(`SELECT * FROM function_observations WHERE system_uid ${predicate}`, parameters,
+      ["id", "system_uid", "binding", "generation", "sequence", "message_key", "message_digest", "content_digest", "canonical", "observed_at", "received_at", "receipt_id"]);
+    const functionObservationConflicts = this.rows(`SELECT * FROM function_observation_conflicts WHERE system_uid ${predicate}`, parameters,
+      ["message_key", "message_digest", "system_uid"]);
+    blocks.push(["functionObservations", functionObservations], ["functionObservationConflicts", functionObservationConflicts]);
     return {
       counts: {
         messages: messages.length,
@@ -287,6 +298,8 @@ export class BrakeDataStore {
         quarantine: quarantine.length,
         resetProducers: resetProducers.length,
         resetCommands: resetCommands.length,
+        functionObservations: functionObservations.length,
+        functionObservationConflicts: functionObservationConflicts.length,
       },
       sha256: sha256Hex(canonicalize(blocks)),
     };
@@ -317,6 +330,8 @@ export class BrakeDataStore {
       this.database.prepare(`DELETE FROM messages WHERE unit_system_uid IN (${placeholders})`).run(...systemUids);
       this.database.prepare(`DELETE FROM demo_reset_commands WHERE system_uid IN (${placeholders})`).run(...systemUids);
       this.database.prepare(`DELETE FROM demo_reset_producers WHERE system_uid IN (${placeholders})`).run(...systemUids);
+      this.database.prepare(`DELETE FROM function_observations WHERE system_uid IN (${placeholders})`).run(...systemUids);
+      this.database.prepare(`DELETE FROM function_observation_conflicts WHERE system_uid IN (${placeholders})`).run(...systemUids);
       const remaining = this.recordSet(systemUids).counts;
       const nonmatchingAfter = this.recordSet(systemUids, false);
       if (!allZero(remaining) || nonmatchingAfter.sha256 !== nonmatchingBefore) {
@@ -550,6 +565,30 @@ export class BrakeDataStore {
     return ["WINDOW"];
   }
 
+  public windowDetail(uid: string, eventId: string) {
+    const row = this.database.prepare("SELECT * FROM windows WHERE unit_system_uid=? AND event_id=?")
+      .get(uid, eventId) as SqlRow | undefined;
+    if (!row) return null;
+    const chunks = this.database.prepare(
+      "SELECT c.chunk_index,c.content_json,m.canonical_message FROM window_chunks c JOIN messages m ON m.id=c.message_id " +
+      "WHERE c.unit_system_uid=? AND c.event_id=? ORDER BY c.chunk_index",
+    ).all(uid, eventId) as SqlRow[];
+    const samples: JsonValue[] = [];
+    for (const row of chunks) {
+      // Revalidate stored canonical bytes: corruption is a storage error,
+      // never an invitation to interpolate or silently omit samples.
+      const parsed = parseBrakeMessage(stringColumn(row, "canonical_message"));
+      const content = objectJson(stringColumn(row, "content_json"));
+      if (parsed.messageType !== "WINDOW_CHUNK" || parsed.unitSystemUid !== uid ||
+          parsed.value.eventId !== eventId || content.chunkIndex !== row.chunk_index ||
+          canonicalize(parsed.value.content!) !== canonicalize(content) || !Array.isArray(content.samples))
+        throw new Error("stored window chunk is inconsistent");
+      samples.push(...content.samples);
+      if (samples.length > 150) throw new Error("stored window sample bound exceeded");
+    }
+    return {window: windowSummary(row), samples};
+  }
+
   private queryWindows(
     uid: string,
     limit: number,
@@ -568,32 +607,7 @@ export class BrakeDataStore {
     ).all(...parameters) as SqlRow[];
     const page = rows.slice(0, limit);
     return {
-      items: page.map((row) => ({
-        eventId: stringColumn(row, "event_id"),
-        unitSystemUid: stringColumn(row, "unit_system_uid"),
-        unitRole: stringColumn(row, "unit_role"),
-        serviceVersion: stringColumn(row, "service_version"),
-        ...(numberColumn(row, "wire_schema_version") === 1
-          ? { serviceArtifactSha256: stringColumn(row, "service_artifact_sha256") }
-          : { messageSchemaVersion: 2, serviceInstance: objectJson(stringColumn(row, "service_instance_json")) }),
-        vdpContractVersion: stringColumn(row, "vdp_contract_version"),
-        vdpContractSha256: stringColumn(row, "vdp_contract_sha256"),
-        windowStartTimestamp: stringColumn(row, "window_start_timestamp"),
-        backendReceivedAt: stringColumn(row, "last_backend_received_at"),
-        deliveryState: stringColumn(row, "delivery_state"),
-        projectionState: stringColumn(row, "projection_state"),
-        terminalState: nullableString(row.terminal_state),
-        receivedChunkCount: numberColumn(row, "received_chunk_count"),
-        expectedChunkCount: nullableNumber(row.expected_chunk_count),
-        receivedSampleCount: numberColumn(row, "received_sample_count"),
-        phaseSampleCounts: {
-          PRE: numberColumn(row, "phase_pre_count"),
-          ACTIVE: numberColumn(row, "phase_active_count"),
-          POST: numberColumn(row, "phase_post_count"),
-        },
-        completionContentSha256: nullableString(row.completion_content_sha256),
-        windowSha256: nullableString(row.window_sha256),
-      })),
+      items: page.map(windowSummary),
       nextKey: rows.length > limit && page.length > 0
         ? [stringColumn(page.at(-1)!, "window_start_timestamp_normalized"), stringColumn(page.at(-1)!, "event_id")]
         : null,
@@ -723,6 +737,35 @@ export class BrakeDataStore {
   }
 }
 
+function windowSummary(row: SqlRow) {
+  return {
+        eventId: stringColumn(row, "event_id"),
+        unitSystemUid: stringColumn(row, "unit_system_uid"),
+        unitRole: stringColumn(row, "unit_role"),
+        serviceVersion: stringColumn(row, "service_version"),
+        ...(numberColumn(row, "wire_schema_version") === 1
+          ? { serviceArtifactSha256: stringColumn(row, "service_artifact_sha256") }
+          : { messageSchemaVersion: 2, serviceInstance: objectJson(stringColumn(row, "service_instance_json")) }),
+        vdpContractVersion: stringColumn(row, "vdp_contract_version"),
+        vdpContractSha256: stringColumn(row, "vdp_contract_sha256"),
+        windowStartTimestamp: stringColumn(row, "window_start_timestamp"),
+        backendReceivedAt: stringColumn(row, "last_backend_received_at"),
+        deliveryState: stringColumn(row, "delivery_state"),
+        projectionState: stringColumn(row, "projection_state"),
+        terminalState: nullableString(row.terminal_state),
+        receivedChunkCount: numberColumn(row, "received_chunk_count"),
+        expectedChunkCount: nullableNumber(row.expected_chunk_count),
+        receivedSampleCount: numberColumn(row, "received_sample_count"),
+        phaseSampleCounts: {
+          PRE: numberColumn(row, "phase_pre_count"),
+          ACTIVE: numberColumn(row, "phase_active_count"),
+          POST: numberColumn(row, "phase_post_count"),
+        },
+        completionContentSha256: nullableString(row.completion_content_sha256),
+        windowSha256: nullableString(row.window_sha256),
+      };
+}
+
 function acknowledgement(
   message: ParsedBrakeMessage,
   receiptId: string,
@@ -814,7 +857,7 @@ function sqlValue(value: unknown): JsonValue {
 }
 
 function zeroCounts(): RecordCounts {
-  return { messages: 0, windows: 0, assessments: 0, events: 0, advisories: 0, quarantine: 0, resetProducers: 0, resetCommands: 0 };
+  return { messages: 0, windows: 0, assessments: 0, events: 0, advisories: 0, quarantine: 0, resetProducers: 0, resetCommands: 0, functionObservations: 0, functionObservationConflicts: 0 };
 }
 
 function allZero(counts: RecordCounts): boolean {

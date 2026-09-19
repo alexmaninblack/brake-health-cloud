@@ -71,6 +71,9 @@ export function applyMigrations(
       if (migration.version === 3 && migration.name === "native_service_provenance") {
         validateLegacyProjectionSource(database, migrations.slice(0, 2));
       }
+      if (migration.version === 5 && migration.name === "function_observations") {
+        validateLegacyProjectionSource(database, migrations.slice(0, 4));
+      }
       database.exec(migration.sql);
       const ledger = migrationLedger(database);
       database
@@ -153,18 +156,19 @@ function validateDatabaseSchemaInternal(
   probeWrites: boolean,
 ): void {
   try {
-    if (migrations.length !== 4 || migrations[0]?.version !== 1 || migrations[0]?.name !== "initialize" ||
+    if (migrations.length !== 5 || migrations[0]?.version !== 1 || migrations[0]?.name !== "initialize" ||
         migrations[1]?.version !== 2 || migrations[1]?.name !== "brake_data" || migrations[2]?.version !== 3 || migrations[2]?.name !== "native_service_provenance" ||
-        migrations[3]?.version !== 4 || migrations[3]?.name !== "demo_scenario_reset" || readSchemaVersion(database) !== 4) {
-      throw new Error("application and database are not the exact v4 migration set");
+        migrations[3]?.version !== 4 || migrations[3]?.name !== "demo_scenario_reset" ||
+        migrations[4]?.version !== 5 || migrations[4]?.name !== "function_observations" || readSchemaVersion(database) !== 5) {
+      throw new Error("application and database are not the exact v5 migration set");
     }
     const ledger = database
       .prepare("SELECT version, name, applied_at FROM schema_version ORDER BY version")
       .all() as Array<{ version: number; name: string; applied_at: string }>;
-    if (ledger.length !== 4 || ledger.some((row, index) =>
+    if (ledger.length !== 5 || ledger.some((row, index) =>
       row.version !== migrations[index]!.version || row.name !== migrations[index]!.name ||
       typeof row.applied_at !== "string" || row.applied_at.length === 0)) {
-      throw new Error("schema_version ledger does not exactly match v3");
+      throw new Error("schema_version ledger does not exactly match v5");
     }
     if (database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'").get() !== undefined) {
       throw new Error("legacy migration ledger remains after v2 transition");
@@ -174,7 +178,7 @@ function validateDatabaseSchemaInternal(
     try {
       applyMigrations(reference, migrations, "1970-01-01T00:00:00.000Z");
       if (JSON.stringify(schemaManifest(database)) !== JSON.stringify(schemaManifest(reference))) {
-        throw new Error("database schema does not exactly match packaged v3");
+        throw new Error("database schema does not exactly match packaged v5");
       }
     } finally {
       reference.close();
@@ -187,7 +191,7 @@ function validateDatabaseSchemaInternal(
     if (probeWrites) probeReadWriteTransaction(database, ledger[1]!.applied_at);
   } catch (error) {
     if (error instanceof MigrationError && error.code === "SCHEMA_VALIDATION_FAILED") throw error;
-    throw new MigrationError("SCHEMA_VALIDATION_FAILED", "database failed exact v3 readiness validation", { cause: error });
+    throw new MigrationError("SCHEMA_VALIDATION_FAILED", "database failed exact v5 readiness validation", { cause: error });
   }
 }
 
@@ -196,7 +200,7 @@ function validateLegacyProjectionSource(database: DatabaseSync, legacy: readonly
   const reference = new DatabaseSync(":memory:");
   try {
     applyMigrations(reference, legacy, "1970-01-01T00:00:00.000Z");
-    if (readSchemaVersion(database) !== 2 ||
+    if (readSchemaVersion(database) !== legacy.length ||
         JSON.stringify(schemaManifest(database)) !== JSON.stringify(schemaManifest(reference))) {
       throw new Error("legacy database does not exactly match the packaged migration source");
     }

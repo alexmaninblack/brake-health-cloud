@@ -29,15 +29,33 @@ Model configuration and VDP compatibility hashes remain unchanged.
 Forward-only migration 003 preserves every canonical message, legacy value
 and receipt. Native projection rows have a canonical native identity and no
 legacy artifact digest. Exact legacy source validation precedes table rebuild;
-failure rolls back the whole migration. Database readiness now reports schema
-3. Query collections emit revision 2 / 2.0.0, retaining original v1/v2 messages;
+failure rolls back the whole migration. Migration 003 introduced schema 3;
+current readiness reports schema 5 after reset and observation migrations.
+Query collections emit revision 2 / 2.0.0, retaining original v1/v2 messages;
 legacy window summaries keep their digest, native summaries carry
 `messageSchemaVersion: 2` and `serviceInstance`. ACK/admin/error/SSE contracts
 are unchanged. No live backend database was migrated by source tests.
 
-The window-detail contract remains an unimplemented endpoint on this branch.
-Producer readers/serializers, Demo Control adapters and Test SOTA proof remain
-required before deployment. This increment is not complete service E2E.
+### Function observations and window detail — P3
+
+Migration 005 adds separate observation/receipt and conflict storage, preserving
+existing product and reset records. Ingestion accepts the closed v3
+`BRAKE_FUNCTION_OBSERVATION` discriminator through the existing message route.
+`GET /api/v1/brake/units/{systemUid}/function-observations?limit=10` returns one
+source-generation/sequence head per native binding, with source freshness and
+visible conflicts. Only limit 1–100 is accepted; no cursor. These are reported
+function facts, not Cloud installation or authentication evidence. Full payload
+retention is 1024 per binding; compact retry identities remain until cleanup.
+
+`GET /api/v1/brake/units/{systemUid}/windows/{eventId}` implements WINDOW_DETAIL
+revision 2 with the existing summary and up to 150 stored points in source
+chunk/sample order. Gaps, phases, source times and provenance are preserved.
+Only a visible window is readable; invalid stored content fails closed.
+No interpolation or model score is added. No query parameters are accepted.
+
+These changes passed isolated source tests, not live deployment qualification.
+Publish compatible backend consumers and cleanup adapters before observation
+producers; Presenter selection and real Test proof remain separate gates.
 
 The existing backend entrypoint accepts these explicit Demo Control inputs:
 
@@ -87,7 +105,7 @@ Process/storage readiness is deliberately independent from vehicle context:
 | Read | Success | Context not yet bound |
 | --- | --- | --- |
 | `GET /health/live` | `200 {"status":"LIVE"}` | Still live |
-| `GET /health/ready` | `200 {"ready":true,"reason":"READY","schemaVersion":3}` | Still storage-ready |
+| `GET /health/ready` | `200 {"ready":true,"reason":"READY","schemaVersion":5}` | Still storage-ready |
 | `GET /health/context` | `200 {"ready":true,"reason":"READY","systemUids":["current-test-system-uid"]}` | `503 {"ready":false,"reason":"CURRENT_UNIT_CONTEXT_UNAVAILABLE","systemUids":[]}` |
 
 Unavailable storage makes query-context readiness false with reason
@@ -106,9 +124,11 @@ Production-only, empty, duplicate, wildcard, foreign and other partial
 selectors are rejected. Confirmation-token, expiry, row-set digest,
 transaction and nonmatching-data preservation semantics are unchanged.
 
-Preview and execute return `nonmatchingRecordCounts`, using the same six
+Preview and execute return `nonmatchingRecordCounts`, using the same ten
 counters as matching records: `messages`, `windows`, `assessments`, `events`,
-`advisories` and `quarantine`. Preview counts are observations, not part of the
+`advisories`, `quarantine`, `resetProducers`, `resetCommands`,
+`functionObservations` and `functionObservationConflicts`.
+Preview counts are observations, not part of the
 confirmation token; changes to unrelated records do not make a Test preview
 stale. Execute returns transactional post-cleanup counts alongside the
 unchanged nonmatching digest. A successful Test cleanup does not mean the
@@ -199,10 +219,12 @@ The read-only response is:
   "schemaVersion": 1,
   "contractVersion": "1.0.0",
   "state": "EMPTY",
-  "databaseSchemaVersion": 2,
+  "databaseSchemaVersion": 5,
   "recordCounts": {
     "messages": 0, "windows": 0, "assessments": 0,
-    "events": 0, "advisories": 0, "quarantine": 0
+    "events": 0, "advisories": 0, "quarantine": 0,
+    "resetProducers": 0, "resetCommands": 0,
+    "functionObservations": 0, "functionObservationConflicts": 0
   },
   "observedAt": "2026-09-10T00:00:00.000Z"
 }
@@ -210,7 +232,7 @@ The read-only response is:
 
 Any nonzero counter produces `NONEMPTY`. The proof revalidates the exact
 packaged schema (including absence of unrecognized tables), migration ledger,
-integrity and foreign-key relationships, then counts all six logical product
+integrity and foreign-key relationships, then counts all ten logical record
 categories in one read transaction. It performs no source-database write or
 deletion and returns no records or Unit identifiers. Missing/broken storage
 or an unexpected schema fails closed with `503 TEMPORARILY_UNAVAILABLE`,
