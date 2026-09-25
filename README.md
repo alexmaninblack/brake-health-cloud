@@ -3,6 +3,13 @@
 
 # Brake Health Cloud
 
+Current integration: demo-v1.1 / Factory39. The integrated Presenter consumes
+this real backend for cards, detail charts, observations and Reset Driver
+Advisory; it is distinct from the standalone fixture Dashboard below.
+The [offline receipt](../aosedge-sdv-demo/docs/qualification/factory-39-offline-2026-09-24.md)
+records Brake92/V3 local continuity and exact derived-message replay. Full
+fresh serial .39 acceptance and the remaining fault matrices are still separate.
+
 This repository contains the Brake Health backend and the source-only Function
 Dashboard. The backend provides loopback health, durable SQLite ingestion,
 acknowledgement, current-Unit REST queries, notification-only SSE and scoped
@@ -55,7 +62,8 @@ No interpolation or model score is added. No query parameters are accepted.
 
 These changes passed isolated source tests, not live deployment qualification.
 Publish compatible backend consumers and cleanup adapters before observation
-producers; Presenter selection and real Test proof remain separate gates.
+producers. Later integrated Presenter/Test receipts cover the running chain;
+they do not retroactively turn these source tests into live proof.
 
 The existing backend entrypoint accepts these explicit Demo Control inputs:
 
@@ -74,7 +82,9 @@ fixed to `127.0.0.1`; no arbitrary bind-address flag exists. Explicit
 `--runtime-mode container` uses the container-internal wildcard interface so
 Docker can forward loopback-published ports. Without an explicit database path, the
 development API retains its disposable temporary-database behavior; a demo
-must supply its owned persistent path. Park/Resume keeps that database.
+must supply its owned persistent path. Ordinary backend/container restart
+retains that database. Studio Park/Resume is retired; it is not the normal
+pause procedure.
 
 The context is a bounded JSON file, read on demand without restarting the
 backend or exposing a new mutating HTTP endpoint:
