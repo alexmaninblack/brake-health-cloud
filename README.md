@@ -3,12 +3,14 @@
 
 # Brake Health Cloud
 
-Current integration: demo-v1.1 / Factory39. The integrated Presenter consumes
+Current integration: Kit028 / Setup042 / Factory41 (7 October 2026). The integrated Presenter consumes
 this real backend for cards, detail charts, observations and Reset Driver
 Advisory; it is distinct from the standalone fixture Dashboard below.
-The [offline receipt](../aosedge-sdv-demo/docs/qualification/factory-39-offline-2026-09-24.md)
-records Brake92/V3 local continuity and exact derived-message replay. Full
-fresh serial .39 acceptance and the remaining fault matrices are still separate.
+The [current baseline](../aosedge-sdv-demo/docs/qualification/current-baseline.md)
+records the installed scripted serial sequence, independent Reset/history,
+offline recovery and post-ignition products. Full native acceptance and broader
+fault matrices remain separate. Source-lock metadata distinguishes the image's
+build revision from later documentation-only commits.
 
 This repository contains the Brake Health backend and the source-only Function
 Dashboard. The backend provides loopback health, durable SQLite ingestion,
