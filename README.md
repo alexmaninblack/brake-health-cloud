@@ -3,6 +3,26 @@
 
 # Brake Health Cloud
 
+Brake Health backend, durable receipts, history and service-scoped reset. Its
+fixture Dashboard is distinct from the integrated Presenter.
+
+## SDV Lab entry
+
+For the complete demo, start at the
+[SDV Lab product repository](https://github.com/alexmaninblack/aosedge-sdv-demo).
+Operators use its prebuilt installer; developers use its pinned build route.
+This component is not a standalone installer for the whole lab. Integration
+source pins and published artifact provenance do not change when this README
+changes. Detailed historical evidence below retains its original scope.
+
+[Advisory integration](docs/advisory-demo-control.md) and
+[freshness behavior](docs/demo-freshness.md).
+
+Local checks: with the pinned Node/npm environment, run `npm run quality`;
+`npm test` exercises the backend/dashboard after dependency preparation. Keep
+build/cache output on the declared SSD. These are not live deployment checks.
+
+
 Current integration: Kit028 / Setup042 / Factory41 (7 October 2026). The integrated Presenter consumes
 this real backend for cards, detail charts, observations and Reset Driver
 Advisory; it is distinct from the standalone fixture Dashboard below.
