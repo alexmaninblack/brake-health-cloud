@@ -14,24 +14,22 @@ provision a Unit, sign/publish packages or simulate incoming vehicle records.
 ## 1 Prepare macOS and the pinned Node toolchain
 
 Run blocks in order in a native Apple Silicon Terminal; stop on error.
-This revised walkthrough has not been executed during the documentation update.
 It is a component-only check, not a vehicle deployment.
 
 ```sh
 uname -m
-printf 'Mounted external APFS volume (for example /Volumes/BUILD): '
-read -r SDV_VOLUME
-diskutil info "$SDV_VOLUME"
-df -h "$SDV_VOLUME"
+printf 'Existing local APFS parent folder (absolute path): '
+read -r SDV_PARENT
+test -d "$SDV_PARENT" && test -w "$SDV_PARENT" && df -h "$SDV_PARENT"
 ```
 
-Expect `arm64` and an already mounted external APFS volume. Do not create a
-missing mount directory. After confirming the volume:
+Expect `arm64` and enough free space on the chosen local APFS volume. Stop
+if the folder/access check fails; do not create a replacement for a missing
+external mount. An external SSD is optional. After confirming storage:
 
 ```sh
-SDV_WORK="$SDV_VOLUME/sdv-components"
-mkdir -p "$SDV_WORK/tools" "$SDV_VOLUME/tmp"
-export TMPDIR="$SDV_VOLUME/tmp"
+SDV_WORK="$SDV_PARENT/sdv-components"
+mkdir -p "$SDV_WORK/tools"
 export npm_config_cache="$SDV_WORK/cache/npm"
 git --version
 ```
@@ -67,7 +65,7 @@ npm --version
 
 Expect `v26.0.0`, `arm64`, `11.12.1`. The
 [Node archive](https://nodejs.org/en/download/archive/v26.0.0) owns these
-downloads. Use a short SSD volume name: macOS Unix sockets have path limits.
+downloads. Use a short workspace path: macOS Unix sockets have path limits.
 
 ## 2 Clone this component
 
@@ -105,7 +103,8 @@ stop here; do not kill another owner. Create a fresh, private, short data path:
 
 ```sh
 umask 077
-SDV_RUN="$(mktemp -d "$SDV_VOLUME/tmp/brake.XXXXXX")"
+mkdir -p "$SDV_WORK/data"
+SDV_RUN="$(mktemp -d "$SDV_WORK/data/brake.XXXXXX")"
 printf 'Local data: %s\n' "$SDV_RUN"
 node out/backend/main.js --port 18491 \
   --database-path "$SDV_RUN/data.sqlite" \
