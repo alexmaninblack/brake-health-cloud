@@ -147,6 +147,12 @@ leave Docker Engine and unrelated workloads running.
 
 ## Backend reference
 
+Current private cleanup request/response schemas are owned by the integration
+[Brake admin profile](https://github.com/alexmaninblack/aosedge-sdv-demo/blob/main/contracts/brake-cloud-api/current-admin-profile.v1.json).
+It describes the existing ten-category protocol, not a new wire deployment.
+The retained six-counter fixtures are compatibility tests, not current client
+validators; selector/HMAC/transaction authority remains with this backend.
+
 This component owns durable Brake product ingestion, receipts, queries,
 function observations and notification-only SSE. It does not sign or publish
 vehicle software. Its current backend-only container does not ship the
