@@ -3,11 +3,14 @@
 
 # Local-demo raw-window freshness budget
 
-On 15 September 2026 the operator approved a 5000-ms maximum source age for
-the current Brake V1 real-data trial. The backend raw-window validator accepts
-the same nonnegative age bound as the service and Solution chunk schemas.
-Values above 5000 ms or negative ages remain invalid. Payload shape, native
-provenance, content hashes, durable acknowledgements and retained-message
-identity are unchanged. Previously valid messages remain valid; mock records
-remain in the isolated mock store. This change makes no V2/V3 model or Advisory
-qualification claim.
+The local-demo raw-window validator accepts `maxSourceAgeMs` from 0 through
+5000 ms, inclusive. This is the same bound as the service's
+[telemetry-window profile](https://github.com/alexmaninblack/aosedge-sdv-demo/blob/main/contracts/brake-telemetry-window/brake-telemetry-window-profile.v1.json)
+and [chunk schema](https://github.com/alexmaninblack/aosedge-sdv-demo/blob/main/contracts/brake-telemetry-window/brake-telemetry-window-chunk.schema.json).
+Values above 5000 ms or negative ages are invalid.
+
+Payload shape, native provenance, content hashes, durable acknowledgements and
+retained-message identity keep their own validation rules. Previously valid
+messages remain valid; mock records stay in the isolated mock store. This
+raw-window ingestion bound is not a qualification claim for V2/V3 models or
+driver Advisory behavior, nor a replacement for their own readiness rules.
